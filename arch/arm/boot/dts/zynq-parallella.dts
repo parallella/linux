@@ -282,6 +282,13 @@
 			interrupts = <0x0 0x7 0x4>;
 			interrupt-parent = <0x1>;
 			clocks = <0x2 0xc>;
+			xlnx,channels {
+				#address-cells = <1>;
+				#size-cells = <0>;
+				channel@0 {
+					reg = <0>;
+				};
+			};
 		};
 
 		ps7-ddrc@f8006000 {
