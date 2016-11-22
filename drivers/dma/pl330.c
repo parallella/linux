@@ -1142,6 +1142,7 @@ static inline int _ldst_devtomem(unsigned dry_run, u8 buf[],
 {
 	int off = 0;
 
+	off += _emit_FLUSHP(dry_run, &buf[off], pxs->desc->peri);
 	while (cyc--) {
 		off += _emit_WFP(dry_run, &buf[off], SINGLE, pxs->desc->peri);
 		off += _emit_LDP(dry_run, &buf[off], SINGLE, pxs->desc->peri);
@@ -1157,6 +1158,7 @@ static inline int _ldst_memtodev(unsigned dry_run, u8 buf[],
 {
 	int off = 0;
 
+	off += _emit_FLUSHP(dry_run, &buf[off], pxs->desc->peri);
 	while (cyc--) {
 		off += _emit_WFP(dry_run, &buf[off], SINGLE, pxs->desc->peri);
 		off += _emit_LD(dry_run, &buf[off], ALWAYS);
