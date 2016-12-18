@@ -877,9 +877,17 @@ static int xadc_read_raw(struct iio_dev *indio_dev,
 			return -EINVAL;
 		}
 	case IIO_CHAN_INFO_OFFSET:
-		/* Only the temperature channel has an offset */
-		*val = -((273150 << 12) / 503975);
-		return IIO_VAL_INT;
+		switch (chan->type) {
+		case IIO_VOLTAGE:
+			*val = 0;
+			return IIO_VAL_INT;
+		case IIO_TEMP:
+			/* Only the temperature channel has an offset */
+			*val = -((273150 << 12) / 503975);
+			return IIO_VAL_INT;
+		default:
+			return -EINVAL;
+		}
 	case IIO_CHAN_INFO_SAMP_FREQ:
 		ret = xadc_read_adc_reg(xadc, XADC_REG_CONF2, &val16);
 		if (ret)
