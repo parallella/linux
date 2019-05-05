@@ -5,7 +5,10 @@
 #include <linux/workqueue.h>
 #include <linux/kfifo.h>
 #include <linux/mutex.h>
+#include <linux/iio/iio.h>
+#include <linux/iio/buffer.h>
 #include <linux/iio/kfifo_buf.h>
+#include <linux/iio/buffer_impl.h>
 #include <linux/sched.h>
 #include <linux/poll.h>
 
@@ -144,11 +147,11 @@ static int iio_kfifo_remove_from(struct iio_buffer *r, void *data)
 	int ret;
 	struct iio_kfifo *kf = iio_to_kfifo(r);
 
-	if (kfifo_size(&kf->kf) < r->bytes_per_datum)
+	if (kfifo_len(&kf->kf) < 1)
 		return -EBUSY;
 
-	ret = kfifo_out(&kf->kf, data, r->bytes_per_datum);
-	if (ret != r->bytes_per_datum)
+	ret = kfifo_out(&kf->kf, data, 1);
+	if (ret != 1)
 		return -EBUSY;
 
 	wake_up_interruptible_poll(&r->pollq, POLLOUT | POLLWRNORM);

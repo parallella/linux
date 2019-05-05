@@ -239,7 +239,7 @@ static int mpc8xxx_gpio_irq_map(struct irq_domain *h, unsigned int irq,
 				irq_hw_number_t hwirq)
 {
 	irq_set_chip_data(irq, h->host_data);
-	irq_set_chip_and_handler(irq, &mpc8xxx_irq_chip, handle_level_irq);
+	irq_set_chip_and_handler(irq, &mpc8xxx_irq_chip, handle_edge_irq);
 
 	return 0;
 }
@@ -348,8 +348,8 @@ static int mpc8xxx_probe(struct platform_device *pdev)
 
 	ret = gpiochip_add_data(gc, mpc8xxx_gc);
 	if (ret) {
-		pr_err("%s: GPIO chip registration failed with status %d\n",
-		       np->full_name, ret);
+		pr_err("%pOF: GPIO chip registration failed with status %d\n",
+		       np, ret);
 		goto err;
 	}
 

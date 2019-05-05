@@ -52,6 +52,8 @@ static int ci_hdrc_usb2_probe(struct platform_device *pdev)
 
 	if (!ci_pdata) {
 		ci_pdata = devm_kmalloc(dev, sizeof(*ci_pdata), GFP_KERNEL);
+		if (!ci_pdata)
+			return -ENOMEM;
 		*ci_pdata = ci_default_pdata;	/* struct copy */
 	}
 
@@ -70,10 +72,6 @@ static int ci_hdrc_usb2_probe(struct platform_device *pdev)
 		}
 	}
 
-	match = of_match_device(ci_hdrc_usb2_of_match, &pdev->dev);
-	if (match && match->data)
-		ci_pdata = (struct ci_hdrc_platform_data *)match->data;
-
 	priv = devm_kzalloc(dev, sizeof(*priv), GFP_KERNEL);
 	if (!priv)
 		return -ENOMEM;
@@ -86,10 +84,6 @@ static int ci_hdrc_usb2_probe(struct platform_device *pdev)
 			return ret;
 		}
 	}
-
-	ret = dma_set_mask_and_coherent(dev, DMA_BIT_MASK(32));
-	if (ret)
-		goto clk_err;
 
 	ci_pdata->name = dev_name(dev);
 

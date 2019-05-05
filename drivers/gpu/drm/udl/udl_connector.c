@@ -96,7 +96,7 @@ static int udl_mode_valid(struct drm_connector *connector,
 static enum drm_connector_status
 udl_detect(struct drm_connector *connector, bool force)
 {
-	if (drm_device_is_unplugged(connector->dev))
+	if (drm_dev_is_unplugged(connector->dev))
 		return connector_status_disconnected;
 	return connector_status_connected;
 }
@@ -150,8 +150,5 @@ int udl_connector_init(struct drm_device *dev, struct drm_encoder *encoder)
 	drm_connector_register(connector);
 	drm_mode_connector_attach_encoder(connector, encoder);
 
-	drm_object_attach_property(&connector->base,
-				      dev->mode_config.dirty_info_property,
-				      1);
 	return 0;
 }

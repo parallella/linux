@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * APIC driver for "bigsmp" xAPIC machines with more than 8 virtual CPUs.
  *
@@ -142,7 +143,7 @@ static int probe_bigsmp(void)
 	return dmi_bigsmp;
 }
 
-static struct apic apic_bigsmp = {
+static struct apic apic_bigsmp __ro_after_init = {
 
 	.name				= "bigsmp",
 	.probe				= probe_bigsmp,
@@ -171,9 +172,8 @@ static struct apic apic_bigsmp = {
 
 	.get_apic_id			= bigsmp_get_apic_id,
 	.set_apic_id			= NULL,
-	.apic_id_mask			= 0xFF << 24,
 
-	.cpu_mask_to_apicid_and		= default_cpu_mask_to_apicid_and,
+	.cpu_mask_to_apicid		= default_cpu_mask_to_apicid,
 
 	.send_IPI			= default_send_IPI_single_phys,
 	.send_IPI_mask			= default_send_IPI_mask_sequence_phys,

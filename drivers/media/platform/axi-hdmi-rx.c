@@ -20,7 +20,7 @@
 
 #include <media/videobuf2-dma-contig.h>
 #include <media/v4l2-event.h>
-#include <media/v4l2-of.h>
+#include <media/v4l2-fwnode.h>
 #include <media/v4l2-ctrls.h>
 #include <media/v4l2-dev.h>
 #include <media/v4l2-device.h>
@@ -61,7 +61,6 @@ struct axi_hdmi_rx_stream {
 
 struct axi_hdmi_rx {
 	struct v4l2_device v4l2_dev;
-	struct vb2_alloc_ctx *alloc_ctx;
 
 	struct axi_hdmi_rx_stream stream;
 
@@ -125,12 +124,10 @@ static const struct v4l2_file_operations axi_hdmi_rx_fops = {
 
 static int axi_hdmi_rx_queue_setup(struct vb2_queue *q,
 	unsigned int *num_buffers, unsigned int *num_planes,
-	unsigned int sizes[], void *alloc_ctxs[])
+	unsigned int sizes[], struct device *alloc_ctxs[])
 {
 	struct axi_hdmi_rx *hdmi_rx = vb2_get_drv_priv(q);
 	struct axi_hdmi_rx_stream *s = &hdmi_rx->stream;
-
-	alloc_ctxs[0] = hdmi_rx->alloc_ctx;
 
 	if (*num_buffers < 1)
 		*num_buffers = 1;
@@ -754,6 +751,7 @@ static int axi_hdmi_rx_nodes_register(struct axi_hdmi_rx *hdmi_rx)
 	vdev->lock = &s->lock;
 	vdev->queue = q;
 	q->lock = &s->lock;
+	q->dev = hdmi_rx->v4l2_dev.dev;
 
 	INIT_LIST_HEAD(&s->queued_buffers);
 	spin_lock_init(&s->spinlock);
@@ -863,7 +861,7 @@ static int axi_hdmi_rx_probe(struct platform_device *pdev)
 	struct device_node *ep_node;
 	struct axi_hdmi_rx *hdmi_rx;
 	struct resource *res;
-	struct v4l2_of_endpoint bus_cfg;
+	struct v4l2_fwnode_endpoint bus_cfg;
 	int ret;
 
 	hdmi_rx = devm_kzalloc(&pdev->dev, sizeof(*hdmi_rx), GFP_KERNEL);
@@ -892,13 +890,6 @@ static int axi_hdmi_rx_probe(struct platform_device *pdev)
 	if (ret)
 		goto err_dma_release_channel;
 
-	hdmi_rx->alloc_ctx = vb2_dma_contig_init_ctx(&pdev->dev);
-	if (IS_ERR(hdmi_rx->alloc_ctx)) {
-		ret = PTR_ERR(hdmi_rx->alloc_ctx);
-		dev_err(&pdev->dev, "Failed to init dma ctx: %d\n", ret);
-		goto err_dma_release_channel;
-	}
-
 	snprintf(hdmi_rx->v4l2_dev.name, sizeof(hdmi_rx->v4l2_dev.name),
 		"axi_hdmi_rx");
 	hdmi_rx->v4l2_dev.notify = axi_hdmi_rx_notify;
@@ -908,7 +899,7 @@ static int axi_hdmi_rx_probe(struct platform_device *pdev)
 	ret = v4l2_device_register(&pdev->dev, &hdmi_rx->v4l2_dev);
 	if (ret) {
 		dev_err(&pdev->dev, "Failed to register card: %d\n", ret);
-		goto err_dma_cleanup_ctx;
+		goto err_dma_release_channel;
 	}
 
 	ep_node = of_graph_get_next_endpoint(pdev->dev.of_node, NULL);
@@ -917,14 +908,14 @@ static int axi_hdmi_rx_probe(struct platform_device *pdev)
 		goto err_device_unregister;
 	}
 	bus_cfg.bus.parallel.bus_width = 0;
-	v4l2_of_parse_endpoint(ep_node, &bus_cfg);
+	v4l2_fwnode_endpoint_parse(of_fwnode_handle(ep_node), &bus_cfg);
 	if (bus_cfg.bus.parallel.bus_width)
 		hdmi_rx->bus_width = bus_cfg.bus.parallel.bus_width;
 	else
 		hdmi_rx->bus_width = 16;
 
-	hdmi_rx->asd.match_type = V4L2_ASYNC_MATCH_OF;
-	hdmi_rx->asd.match.of.node = of_graph_get_remote_port_parent(ep_node);
+	hdmi_rx->asd.match_type = V4L2_ASYNC_MATCH_FWNODE;
+	hdmi_rx->asd.match.fwnode.fwnode = of_fwnode_handle(of_graph_get_remote_port_parent(ep_node));
 
 	hdmi_rx->asds[0] = &hdmi_rx->asd;
 	hdmi_rx->notifier.subdevs = hdmi_rx->asds;
@@ -946,8 +937,6 @@ static int axi_hdmi_rx_probe(struct platform_device *pdev)
 
 err_device_unregister:
 	v4l2_device_unregister(&hdmi_rx->v4l2_dev);
-err_dma_cleanup_ctx:
-	vb2_dma_contig_cleanup_ctx(hdmi_rx->alloc_ctx);
 err_dma_release_channel:
 	dma_release_channel(hdmi_rx->stream.chan);
 	return ret;
@@ -960,7 +949,6 @@ static int axi_hdmi_rx_remove(struct platform_device *pdev)
 	v4l2_async_notifier_unregister(&hdmi_rx->notifier);
 	video_unregister_device(&hdmi_rx->stream.vdev);
 	v4l2_device_unregister(&hdmi_rx->v4l2_dev);
-	vb2_dma_contig_cleanup_ctx(hdmi_rx->alloc_ctx);
 	dma_release_channel(hdmi_rx->stream.chan);
 
 	return 0;

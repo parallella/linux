@@ -24,6 +24,9 @@
 #include <linux/module.h>
 #include <linux/usb.h>
 #include <linux/firmware.h>
+#include <linux/of_device.h>
+#include <linux/of_irq.h>
+#include <linux/suspend.h>
 #include <asm/unaligned.h>
 
 #include <net/bluetooth/bluetooth.h>
@@ -62,6 +65,8 @@ static struct usb_driver btusb_driver;
 #define BTUSB_REALTEK		0x20000
 #define BTUSB_BCM2045		0x40000
 #define BTUSB_IFNUM_2		0x80000
+#define BTUSB_CW6622		0x100000
+#define BTUSB_BCM_NO_PRODID	0x200000
 
 static const struct usb_device_id btusb_table[] = {
 	/* Generic Bluetooth USB device */
@@ -127,7 +132,12 @@ static const struct usb_device_id btusb_table[] = {
 	{ USB_DEVICE(0x19ff, 0x0239), .driver_info = BTUSB_BCM_PATCHRAM },
 
 	/* Broadcom BCM43142A0 (Foxconn/Lenovo) */
-	{ USB_DEVICE(0x105b, 0xe065), .driver_info = BTUSB_BCM_PATCHRAM },
+	{ USB_VENDOR_AND_INTERFACE_INFO(0x105b, 0xff, 0x01, 0x01),
+	  .driver_info = BTUSB_BCM_PATCHRAM },
+
+	/* Broadcom BCM920703 (HTC Vive) */
+	{ USB_VENDOR_AND_INTERFACE_INFO(0x0bb4, 0xff, 0x01, 0x01),
+	  .driver_info = BTUSB_BCM_PATCHRAM },
 
 	/* Foxconn - Hon Hai */
 	{ USB_VENDOR_AND_INTERFACE_INFO(0x0489, 0xff, 0x01, 0x01),
@@ -153,9 +163,17 @@ static const struct usb_device_id btusb_table[] = {
 	{ USB_VENDOR_AND_INTERFACE_INFO(0x13d3, 0xff, 0x01, 0x01),
 	  .driver_info = BTUSB_BCM_PATCHRAM },
 
+	/* Dell Computer - Broadcom based  */
+	{ USB_VENDOR_AND_INTERFACE_INFO(0x413c, 0xff, 0x01, 0x01),
+	  .driver_info = BTUSB_BCM_PATCHRAM },
+
 	/* Toshiba Corp - Broadcom based */
 	{ USB_VENDOR_AND_INTERFACE_INFO(0x0930, 0xff, 0x01, 0x01),
 	  .driver_info = BTUSB_BCM_PATCHRAM },
+
+	/* Broadcom devices with missing product id */
+	{ USB_DEVICE_AND_INTERFACE_INFO(0x0000, 0x0000, 0xff, 0x01, 0x01),
+	  .driver_info = BTUSB_BCM_PATCHRAM | BTUSB_BCM_NO_PRODID },
 
 	/* Intel Bluetooth USB Bootloader (RAM module) */
 	{ USB_DEVICE(0x8087, 0x0a5a),
@@ -208,6 +226,7 @@ static const struct usb_device_id blacklist_table[] = {
 	{ USB_DEVICE(0x04ca, 0x300f), .driver_info = BTUSB_ATH3012 },
 	{ USB_DEVICE(0x04ca, 0x3010), .driver_info = BTUSB_ATH3012 },
 	{ USB_DEVICE(0x04ca, 0x3014), .driver_info = BTUSB_ATH3012 },
+	{ USB_DEVICE(0x04ca, 0x3018), .driver_info = BTUSB_ATH3012 },
 	{ USB_DEVICE(0x0930, 0x0219), .driver_info = BTUSB_ATH3012 },
 	{ USB_DEVICE(0x0930, 0x021c), .driver_info = BTUSB_ATH3012 },
 	{ USB_DEVICE(0x0930, 0x0220), .driver_info = BTUSB_ATH3012 },
@@ -236,6 +255,8 @@ static const struct usb_device_id blacklist_table[] = {
 	{ USB_DEVICE(0x13d3, 0x3432), .driver_info = BTUSB_ATH3012 },
 	{ USB_DEVICE(0x13d3, 0x3472), .driver_info = BTUSB_ATH3012 },
 	{ USB_DEVICE(0x13d3, 0x3474), .driver_info = BTUSB_ATH3012 },
+	{ USB_DEVICE(0x13d3, 0x3487), .driver_info = BTUSB_ATH3012 },
+	{ USB_DEVICE(0x13d3, 0x3490), .driver_info = BTUSB_ATH3012 },
 
 	/* Atheros AR5BBU12 with sflash firmware */
 	{ USB_DEVICE(0x0489, 0xe02c), .driver_info = BTUSB_IGNORE },
@@ -246,8 +267,14 @@ static const struct usb_device_id blacklist_table[] = {
 
 	/* QCA ROME chipset */
 	{ USB_DEVICE(0x0cf3, 0xe007), .driver_info = BTUSB_QCA_ROME },
+	{ USB_DEVICE(0x0cf3, 0xe009), .driver_info = BTUSB_QCA_ROME },
 	{ USB_DEVICE(0x0cf3, 0xe300), .driver_info = BTUSB_QCA_ROME },
+	{ USB_DEVICE(0x0cf3, 0xe301), .driver_info = BTUSB_QCA_ROME },
 	{ USB_DEVICE(0x0cf3, 0xe360), .driver_info = BTUSB_QCA_ROME },
+	{ USB_DEVICE(0x0489, 0xe092), .driver_info = BTUSB_QCA_ROME },
+	{ USB_DEVICE(0x0489, 0xe0a2), .driver_info = BTUSB_QCA_ROME },
+	{ USB_DEVICE(0x04ca, 0x3011), .driver_info = BTUSB_QCA_ROME },
+	{ USB_DEVICE(0x04ca, 0x3016), .driver_info = BTUSB_QCA_ROME },
 
 	/* Broadcom BCM2035 */
 	{ USB_DEVICE(0x0a5c, 0x2009), .driver_info = BTUSB_BCM92035 },
@@ -287,7 +314,8 @@ static const struct usb_device_id blacklist_table[] = {
 	{ USB_DEVICE(0x0400, 0x080a), .driver_info = BTUSB_BROKEN_ISOC },
 
 	/* CONWISE Technology based adapters with buggy SCO support */
-	{ USB_DEVICE(0x0e5e, 0x6622), .driver_info = BTUSB_BROKEN_ISOC },
+	{ USB_DEVICE(0x0e5e, 0x6622),
+	  .driver_info = BTUSB_BROKEN_ISOC | BTUSB_CW6622},
 
 	/* Roper Class 1 Bluetooth Dongle (Silicon Wave based) */
 	{ USB_DEVICE(0x1310, 0x0001), .driver_info = BTUSB_SWAVE },
@@ -307,12 +335,16 @@ static const struct usb_device_id blacklist_table[] = {
 	/* Marvell Bluetooth devices */
 	{ USB_DEVICE(0x1286, 0x2044), .driver_info = BTUSB_MARVELL },
 	{ USB_DEVICE(0x1286, 0x2046), .driver_info = BTUSB_MARVELL },
+	{ USB_DEVICE(0x1286, 0x204e), .driver_info = BTUSB_MARVELL },
 
 	/* Intel Bluetooth devices */
+	{ USB_DEVICE(0x8087, 0x0025), .driver_info = BTUSB_INTEL_NEW },
 	{ USB_DEVICE(0x8087, 0x07da), .driver_info = BTUSB_CSR },
 	{ USB_DEVICE(0x8087, 0x07dc), .driver_info = BTUSB_INTEL },
 	{ USB_DEVICE(0x8087, 0x0a2a), .driver_info = BTUSB_INTEL },
 	{ USB_DEVICE(0x8087, 0x0a2b), .driver_info = BTUSB_INTEL_NEW },
+	{ USB_DEVICE(0x8087, 0x0aa7), .driver_info = BTUSB_INTEL },
+	{ USB_DEVICE(0x8087, 0x0aaa), .driver_info = BTUSB_INTEL_NEW },
 
 	/* Other Intel Bluetooth devices */
 	{ USB_VENDOR_AND_INTERFACE_INFO(0x8087, 0xe0, 0x01, 0x01),
@@ -332,6 +364,7 @@ static const struct usb_device_id blacklist_table[] = {
 	{ USB_DEVICE(0x13d3, 0x3410), .driver_info = BTUSB_REALTEK },
 	{ USB_DEVICE(0x13d3, 0x3416), .driver_info = BTUSB_REALTEK },
 	{ USB_DEVICE(0x13d3, 0x3459), .driver_info = BTUSB_REALTEK },
+	{ USB_DEVICE(0x13d3, 0x3494), .driver_info = BTUSB_REALTEK },
 
 	/* Additional Realtek 8821AE Bluetooth devices */
 	{ USB_DEVICE(0x0b05, 0x17dc), .driver_info = BTUSB_REALTEK },
@@ -360,6 +393,7 @@ static const struct usb_device_id blacklist_table[] = {
 #define BTUSB_BOOTING		9
 #define BTUSB_RESET_RESUME	10
 #define BTUSB_DIAG_RUNNING	11
+#define BTUSB_OOB_WAKE_ENABLED	12
 
 struct btusb_data {
 	struct hci_dev       *hdev;
@@ -407,6 +441,8 @@ struct btusb_data {
 	int (*recv_bulk)(struct btusb_data *data, void *buffer, int count);
 
 	int (*setup_on_usb)(struct hci_dev *hdev);
+
+	int oob_wake_irq;   /* irq for out-of-band wake-on-bt */
 };
 
 static inline void btusb_free_frags(struct btusb_data *data)
@@ -450,7 +486,7 @@ static int btusb_recv_intr(struct btusb_data *data, void *buffer, int count)
 		}
 
 		len = min_t(uint, hci_skb_expect(skb), count);
-		memcpy(skb_put(skb, len), buffer, len);
+		skb_put_data(skb, buffer, len);
 
 		count -= len;
 		buffer += len;
@@ -505,7 +541,7 @@ static int btusb_recv_bulk(struct btusb_data *data, void *buffer, int count)
 		}
 
 		len = min_t(uint, hci_skb_expect(skb), count);
-		memcpy(skb_put(skb, len), buffer, len);
+		skb_put_data(skb, buffer, len);
 
 		count -= len;
 		buffer += len;
@@ -562,7 +598,7 @@ static int btusb_recv_isoc(struct btusb_data *data, void *buffer, int count)
 		}
 
 		len = min_t(uint, hci_skb_expect(skb), count);
-		memcpy(skb_put(skb, len), buffer, len);
+		skb_put_data(skb, buffer, len);
 
 		count -= len;
 		buffer += len;
@@ -628,7 +664,8 @@ static void btusb_intr_complete(struct urb *urb)
 	err = usb_submit_urb(urb, GFP_ATOMIC);
 	if (err < 0) {
 		/* -EPERM: urb is being killed;
-		 * -ENODEV: device got disconnected */
+		 * -ENODEV: device got disconnected
+		 */
 		if (err != -EPERM && err != -ENODEV)
 			BT_ERR("%s urb %p failed to resubmit (%d)",
 			       hdev->name, urb, -err);
@@ -717,7 +754,8 @@ static void btusb_bulk_complete(struct urb *urb)
 	err = usb_submit_urb(urb, GFP_ATOMIC);
 	if (err < 0) {
 		/* -EPERM: urb is being killed;
-		 * -ENODEV: device got disconnected */
+		 * -ENODEV: device got disconnected
+		 */
 		if (err != -EPERM && err != -ENODEV)
 			BT_ERR("%s urb %p failed to resubmit (%d)",
 			       hdev->name, urb, -err);
@@ -812,7 +850,8 @@ static void btusb_isoc_complete(struct urb *urb)
 	err = usb_submit_urb(urb, GFP_ATOMIC);
 	if (err < 0) {
 		/* -EPERM: urb is being killed;
-		 * -ENODEV: device got disconnected */
+		 * -ENODEV: device got disconnected
+		 */
 		if (err != -EPERM && err != -ENODEV)
 			BT_ERR("%s urb %p failed to resubmit (%d)",
 			       hdev->name, urb, -err);
@@ -906,8 +945,8 @@ static void btusb_diag_complete(struct urb *urb)
 
 		skb = bt_skb_alloc(urb->actual_length, GFP_ATOMIC);
 		if (skb) {
-			memcpy(skb_put(skb, urb->actual_length),
-			       urb->transfer_buffer, urb->actual_length);
+			skb_put_data(skb, urb->transfer_buffer,
+				     urb->actual_length);
 			hci_recv_diag(hdev, skb);
 		}
 	} else if (urb->status == -ENOENT) {
@@ -924,7 +963,8 @@ static void btusb_diag_complete(struct urb *urb)
 	err = usb_submit_urb(urb, GFP_ATOMIC);
 	if (err < 0) {
 		/* -EPERM: urb is being killed;
-		 * -ENODEV: device got disconnected */
+		 * -ENODEV: device got disconnected
+		 */
 		if (err != -EPERM && err != -ENODEV)
 			BT_ERR("%s urb %p failed to resubmit (%d)",
 			       hdev->name, urb, -err);
@@ -1034,6 +1074,10 @@ static int btusb_open(struct hci_dev *hdev)
 
 	BT_DBG("%s", hdev->name);
 
+	err = usb_autopm_get_interface(data->intf);
+	if (err < 0)
+		return err;
+
 	/* Patching USB firmware files prior to starting any URBs of HCI path
 	 * It is more safe to use USB bulk channel for downloading USB patch
 	 */
@@ -1043,11 +1087,11 @@ static int btusb_open(struct hci_dev *hdev)
 			return err;
 	}
 
-	err = usb_autopm_get_interface(data->intf);
-	if (err < 0)
-		return err;
-
 	data->intf->needs_remote_wakeup = 1;
+	/* device specific wakeup source enabled and required for USB
+	 * remote wakeup while host is suspended
+	 */
+	device_wakeup_enable(&data->udev->dev);
 
 	if (test_and_set_bit(BTUSB_INTR_RUNNING, &data->flags))
 		goto done;
@@ -1111,6 +1155,7 @@ static int btusb_close(struct hci_dev *hdev)
 		goto failed;
 
 	data->intf->needs_remote_wakeup = 0;
+	device_wakeup_disable(&data->udev->dev);
 	usb_autopm_put_interface(data->intf);
 
 failed:
@@ -1808,15 +1853,15 @@ static int inject_cmd_complete(struct hci_dev *hdev, __u16 opcode)
 	if (!skb)
 		return -ENOMEM;
 
-	hdr = (struct hci_event_hdr *)skb_put(skb, sizeof(*hdr));
+	hdr = skb_put(skb, sizeof(*hdr));
 	hdr->evt = HCI_EV_CMD_COMPLETE;
 	hdr->plen = sizeof(*evt) + 1;
 
-	evt = (struct hci_ev_cmd_complete *)skb_put(skb, sizeof(*evt));
+	evt = skb_put(skb, sizeof(*evt));
 	evt->ncmd = 0x01;
 	evt->opcode = cpu_to_le16(opcode);
 
-	*skb_put(skb, 1) = 0x00;
+	skb_put_u8(skb, 0x00);
 
 	hci_skb_pkt_type(skb) = HCI_EVENT_PKT;
 
@@ -2001,12 +2046,19 @@ static int btusb_setup_intel_new(struct hci_dev *hdev)
 		return -EINVAL;
 	}
 
-	/* At the moment only the hardware variant iBT 3.0 (LnP/SfP) is
-	 * supported by this firmware loading method. This check has been
-	 * put in place to ensure correct forward compatibility options
-	 * when newer hardware variants come along.
+	/* Check for supported iBT hardware variants of this firmware
+	 * loading method.
+	 *
+	 * This check has been put in place to ensure correct forward
+	 * compatibility options when newer hardware variants come along.
 	 */
-	if (ver.hw_variant != 0x0b) {
+	switch (ver.hw_variant) {
+	case 0x0b:	/* SfP */
+	case 0x0c:	/* WsP */
+	case 0x11:	/* JfP */
+	case 0x12:	/* ThP */
+		break;
+	default:
 		BT_ERR("%s: Unsupported Intel hardware variant (%u)",
 		       hdev->name, ver.hw_variant);
 		return -EINVAL;
@@ -2101,10 +2153,16 @@ static int btusb_setup_intel_new(struct hci_dev *hdev)
 	/* With this Intel bootloader only the hardware variant and device
 	 * revision information are used to select the right firmware.
 	 *
-	 * Currently this bootloader support is limited to hardware variant
-	 * iBT 3.0 (LnP/SfP) which is identified by the value 11 (0x0b).
+	 * The firmware filename is ibt-<hw_variant>-<dev_revid>.sfi.
+	 *
+	 * Currently the supported hardware variants are:
+	 *   11 (0x0b) for iBT3.0 (LnP/SfP)
+	 *   12 (0x0c) for iBT3.5 (WsP)
+	 *   17 (0x11) for iBT3.5 (JfP)
+	 *   18 (0x12) for iBT3.5 (ThP)
 	 */
-	snprintf(fwname, sizeof(fwname), "intel/ibt-11-%u.sfi",
+	snprintf(fwname, sizeof(fwname), "intel/ibt-%u-%u.sfi",
+		 le16_to_cpu(ver.hw_variant),
 		 le16_to_cpu(params->dev_revid));
 
 	err = request_firmware(&fw, fwname, &hdev->dev);
@@ -2120,7 +2178,8 @@ static int btusb_setup_intel_new(struct hci_dev *hdev)
 	/* Save the DDC file name for later use to apply once the firmware
 	 * downloading is done.
 	 */
-	snprintf(fwname, sizeof(fwname), "intel/ibt-11-%u.ddc",
+	snprintf(fwname, sizeof(fwname), "intel/ibt-%u-%u.ddc",
+		 le16_to_cpu(ver.hw_variant),
 		 le16_to_cpu(params->dev_revid));
 
 	kfree_skb(skb);
@@ -2211,9 +2270,8 @@ static int btusb_setup_intel_new(struct hci_dev *hdev)
 	err = wait_on_bit_timeout(&data->flags, BTUSB_DOWNLOADING,
 				  TASK_INTERRUPTIBLE,
 				  msecs_to_jiffies(5000));
-	if (err == 1) {
+	if (err == -EINTR) {
 		BT_ERR("%s: Firmware loading interrupted", hdev->name);
-		err = -EINTR;
 		goto done;
 	}
 
@@ -2265,7 +2323,7 @@ done:
 				  TASK_INTERRUPTIBLE,
 				  msecs_to_jiffies(1000));
 
-	if (err == 1) {
+	if (err == -EINTR) {
 		BT_ERR("%s: Device boot interrupted", hdev->name);
 		return -EINTR;
 	}
@@ -2323,6 +2381,50 @@ static int btusb_shutdown_intel(struct hci_dev *hdev)
 
 	return 0;
 }
+
+#ifdef CONFIG_PM
+/* Configure an out-of-band gpio as wake-up pin, if specified in device tree */
+static int marvell_config_oob_wake(struct hci_dev *hdev)
+{
+	struct sk_buff *skb;
+	struct btusb_data *data = hci_get_drvdata(hdev);
+	struct device *dev = &data->udev->dev;
+	u16 pin, gap, opcode;
+	int ret;
+	u8 cmd[5];
+
+	/* Move on if no wakeup pin specified */
+	if (of_property_read_u16(dev->of_node, "marvell,wakeup-pin", &pin) ||
+	    of_property_read_u16(dev->of_node, "marvell,wakeup-gap-ms", &gap))
+		return 0;
+
+	/* Vendor specific command to configure a GPIO as wake-up pin */
+	opcode = hci_opcode_pack(0x3F, 0x59);
+	cmd[0] = opcode & 0xFF;
+	cmd[1] = opcode >> 8;
+	cmd[2] = 2; /* length of parameters that follow */
+	cmd[3] = pin;
+	cmd[4] = gap; /* time in ms, for which wakeup pin should be asserted */
+
+	skb = bt_skb_alloc(sizeof(cmd), GFP_KERNEL);
+	if (!skb) {
+		bt_dev_err(hdev, "%s: No memory\n", __func__);
+		return -ENOMEM;
+	}
+
+	skb_put_data(skb, cmd, sizeof(cmd));
+	hci_skb_pkt_type(skb) = HCI_COMMAND_PKT;
+
+	ret = btusb_send_frame(hdev, skb);
+	if (ret) {
+		bt_dev_err(hdev, "%s: configuration failed\n", __func__);
+		kfree_skb(skb);
+		return ret;
+	}
+
+	return 0;
+}
+#endif
 
 static int btusb_set_bdaddr_marvell(struct hci_dev *hdev,
 				    const bdaddr_t *bdaddr)
@@ -2682,8 +2784,8 @@ static struct urb *alloc_diag_urb(struct hci_dev *hdev, bool enable)
 		return ERR_PTR(-ENOMEM);
 	}
 
-	*skb_put(skb, 1) = 0xf0;
-	*skb_put(skb, 1) = enable;
+	skb_put_u8(skb, 0xf0);
+	skb_put_u8(skb, enable);
 
 	pipe = usb_sndbulkpipe(data->udev, data->diag_tx_ep->bEndpointAddress);
 
@@ -2711,6 +2813,67 @@ static int btusb_bcm_set_diag(struct hci_dev *hdev, bool enable)
 		return PTR_ERR(urb);
 
 	return submit_or_queue_tx_urb(hdev, urb);
+}
+#endif
+
+#ifdef CONFIG_PM
+static irqreturn_t btusb_oob_wake_handler(int irq, void *priv)
+{
+	struct btusb_data *data = priv;
+
+	pm_wakeup_event(&data->udev->dev, 0);
+	pm_system_wakeup();
+
+	/* Disable only if not already disabled (keep it balanced) */
+	if (test_and_clear_bit(BTUSB_OOB_WAKE_ENABLED, &data->flags)) {
+		disable_irq_nosync(irq);
+		disable_irq_wake(irq);
+	}
+	return IRQ_HANDLED;
+}
+
+static const struct of_device_id btusb_match_table[] = {
+	{ .compatible = "usb1286,204e" },
+	{ }
+};
+MODULE_DEVICE_TABLE(of, btusb_match_table);
+
+/* Use an oob wakeup pin? */
+static int btusb_config_oob_wake(struct hci_dev *hdev)
+{
+	struct btusb_data *data = hci_get_drvdata(hdev);
+	struct device *dev = &data->udev->dev;
+	int irq, ret;
+
+	clear_bit(BTUSB_OOB_WAKE_ENABLED, &data->flags);
+
+	if (!of_match_device(btusb_match_table, dev))
+		return 0;
+
+	/* Move on if no IRQ specified */
+	irq = of_irq_get_byname(dev->of_node, "wakeup");
+	if (irq <= 0) {
+		bt_dev_dbg(hdev, "%s: no OOB Wakeup IRQ in DT", __func__);
+		return 0;
+	}
+
+	ret = devm_request_irq(&hdev->dev, irq, btusb_oob_wake_handler,
+			       0, "OOB Wake-on-BT", data);
+	if (ret) {
+		bt_dev_err(hdev, "%s: IRQ request failed", __func__);
+		return ret;
+	}
+
+	ret = device_init_wakeup(dev, true);
+	if (ret) {
+		bt_dev_err(hdev, "%s: failed to init_wakeup", __func__);
+		return ret;
+	}
+
+	data->oob_wake_irq = irq;
+	disable_irq(irq);
+	bt_dev_info(hdev, "OOB Wake-on-BT configured at IRQ %u", irq);
+	return 0;
 }
 #endif
 
@@ -2746,11 +2909,25 @@ static int btusb_probe(struct usb_interface *intf,
 	if (id->driver_info == BTUSB_IGNORE)
 		return -ENODEV;
 
+	if (id->driver_info & BTUSB_BCM_NO_PRODID) {
+		struct usb_device *udev = interface_to_usbdev(intf);
+
+		/* For the broken Broadcom devices that show 0000:0000
+		 * as USB vendor and product information, check that the
+		 * manufacturer string identifies them as Broadcom based
+		 * devices.
+		 */
+		if (!udev->manufacturer ||
+		    strcmp(udev->manufacturer, "Broadcom Corp"))
+			return -ENODEV;
+	}
+
 	if (id->driver_info & BTUSB_ATH3012) {
 		struct usb_device *udev = interface_to_usbdev(intf);
 
 		/* Old firmware would otherwise let ath3k driver load
-		 * patch and sysconfig files */
+		 * patch and sysconfig files
+		 */
 		if (le16_to_cpu(udev->descriptor.bcdDevice) <= 0x0001)
 			return -ENODEV;
 	}
@@ -2823,7 +3000,7 @@ static int btusb_probe(struct usb_interface *intf,
 	if (id->driver_info & BTUSB_AMP)
 		hdev->dev_type = HCI_AMP;
 	else
-		hdev->dev_type = HCI_BREDR;
+		hdev->dev_type = HCI_PRIMARY;
 
 	data->hdev = hdev;
 
@@ -2834,6 +3011,21 @@ static int btusb_probe(struct usb_interface *intf,
 	hdev->flush  = btusb_flush;
 	hdev->send   = btusb_send_frame;
 	hdev->notify = btusb_notify;
+
+#ifdef CONFIG_PM
+	err = btusb_config_oob_wake(hdev);
+	if (err)
+		goto out_free_dev;
+
+	/* Marvell devices may need a specific chip configuration */
+	if (id->driver_info & BTUSB_MARVELL && data->oob_wake_irq) {
+		err = marvell_config_oob_wake(hdev);
+		if (err)
+			goto out_free_dev;
+	}
+#endif
+	if (id->driver_info & BTUSB_CW6622)
+		set_bit(HCI_QUIRK_BROKEN_STORED_LINK_KEY, &hdev->quirks);
 
 	if (id->driver_info & BTUSB_BCM2045)
 		set_bit(HCI_QUIRK_BROKEN_STORED_LINK_KEY, &hdev->quirks);
@@ -2906,6 +3098,12 @@ static int btusb_probe(struct usb_interface *intf,
 	if (id->driver_info & BTUSB_QCA_ROME) {
 		data->setup_on_usb = btusb_setup_qca;
 		hdev->set_bdaddr = btusb_set_bdaddr_ath3012;
+
+		/* QCA Rome devices lose their updated firmware over suspend,
+		 * but the USB hub doesn't notice any status change.
+		 * Explicitly request a device reset on resume.
+		 */
+		set_bit(BTUSB_RESET_RESUME, &data->flags);
 	}
 
 #ifdef CONFIG_BT_HCIBTUSB_RTL
@@ -2974,18 +3172,15 @@ static int btusb_probe(struct usb_interface *intf,
 		err = usb_set_interface(data->udev, 0, 0);
 		if (err < 0) {
 			BT_ERR("failed to set interface 0, alt 0 %d", err);
-			hci_free_dev(hdev);
-			return err;
+			goto out_free_dev;
 		}
 	}
 
 	if (data->isoc) {
 		err = usb_driver_claim_interface(&btusb_driver,
 						 data->isoc, data);
-		if (err < 0) {
-			hci_free_dev(hdev);
-			return err;
-		}
+		if (err < 0)
+			goto out_free_dev;
 	}
 
 #ifdef CONFIG_BT_HCIBTUSB_BCM
@@ -2999,14 +3194,16 @@ static int btusb_probe(struct usb_interface *intf,
 #endif
 
 	err = hci_register_dev(hdev);
-	if (err < 0) {
-		hci_free_dev(hdev);
-		return err;
-	}
+	if (err < 0)
+		goto out_free_dev;
 
 	usb_set_intfdata(intf, data);
 
 	return 0;
+
+out_free_dev:
+	hci_free_dev(hdev);
+	return err;
 }
 
 static void btusb_disconnect(struct usb_interface *intf)
@@ -3045,6 +3242,9 @@ static void btusb_disconnect(struct usb_interface *intf)
 			usb_driver_release_interface(&btusb_driver, data->isoc);
 	}
 
+	if (data->oob_wake_irq)
+		device_init_wakeup(&data->udev->dev, false);
+
 	hci_free_dev(hdev);
 }
 
@@ -3073,6 +3273,12 @@ static int btusb_suspend(struct usb_interface *intf, pm_message_t message)
 	btusb_stop_traffic(data);
 	usb_kill_anchored_urbs(&data->tx_anchor);
 
+	if (data->oob_wake_irq && device_may_wakeup(&data->udev->dev)) {
+		set_bit(BTUSB_OOB_WAKE_ENABLED, &data->flags);
+		enable_irq_wake(data->oob_wake_irq);
+		enable_irq(data->oob_wake_irq);
+	}
+
 	/* Optionally request a device reset on resume, but only when
 	 * wakeups are disabled. If wakeups are enabled we assume the
 	 * device will stay powered up throughout suspend.
@@ -3090,13 +3296,28 @@ static void play_deferred(struct btusb_data *data)
 	int err;
 
 	while ((urb = usb_get_from_anchor(&data->deferred))) {
+		usb_anchor_urb(urb, &data->tx_anchor);
+
 		err = usb_submit_urb(urb, GFP_ATOMIC);
-		if (err < 0)
+		if (err < 0) {
+			if (err != -EPERM && err != -ENODEV)
+				BT_ERR("%s urb %p submission failed (%d)",
+				       data->hdev->name, urb, -err);
+			kfree(urb->setup_packet);
+			usb_unanchor_urb(urb);
+			usb_free_urb(urb);
 			break;
+		}
 
 		data->tx_in_flight++;
+		usb_free_urb(urb);
 	}
-	usb_scuttle_anchored_urbs(&data->deferred);
+
+	/* Cleanup the rest deferred urbs. */
+	while ((urb = usb_get_from_anchor(&data->deferred))) {
+		kfree(urb->setup_packet);
+		usb_free_urb(urb);
+	}
 }
 
 static int btusb_resume(struct usb_interface *intf)
@@ -3109,6 +3330,12 @@ static int btusb_resume(struct usb_interface *intf)
 
 	if (--data->suspend_count)
 		return 0;
+
+	/* Disable only if not already disabled (keep it balanced) */
+	if (test_and_clear_bit(BTUSB_OOB_WAKE_ENABLED, &data->flags)) {
+		disable_irq(data->oob_wake_irq);
+		disable_irq_wake(data->oob_wake_irq);
+	}
 
 	if (!test_bit(HCI_RUNNING, &hdev->flags))
 		goto done;

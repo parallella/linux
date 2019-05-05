@@ -19,8 +19,10 @@
 #include <drm/drm_crtc_helper.h>
 #include <drm/drm_gem_cma_helper.h>
 
+#include <linux/component.h>
 #include <linux/device.h>
 #include <linux/module.h>
+#include <linux/of_graph.h>
 #include <linux/platform_device.h>
 
 #include "xilinx_drm_connector.h"
@@ -53,6 +55,7 @@ struct xilinx_drm_private {
 	struct drm_crtc *crtc;
 	struct drm_fb_helper *fb;
 	struct platform_device *pdev;
+	bool is_master;
 };
 
 /**
@@ -68,20 +71,34 @@ struct xilinx_video_format_desc {
 	unsigned int depth;
 	unsigned int bpp;
 	unsigned int xilinx_format;
-	uint32_t drm_format;
+	u32 drm_format;
 };
 
 static const struct xilinx_video_format_desc xilinx_video_formats[] = {
-	{ "yuv422", 16, 16, XILINX_VIDEO_FORMAT_YUV422, DRM_FORMAT_YUYV },
-	{ "yuv444", 24, 24, XILINX_VIDEO_FORMAT_YUV444, DRM_FORMAT_YUV444 },
-	{ "rgb888", 24, 24, XILINX_VIDEO_FORMAT_RGB, DRM_FORMAT_RGB888 },
 	{ "yuv420", 16, 16, XILINX_VIDEO_FORMAT_YUV420, DRM_FORMAT_YUV420 },
-	{ "xrgb8888", 24, 32, XILINX_VIDEO_FORMAT_XRGB, DRM_FORMAT_XRGB8888 },
-	{ "rgba8888", 32, 32, XILINX_VIDEO_FORMAT_NONE, DRM_FORMAT_RGBA8888 },
-	{ "rgb565", 16, 16, XILINX_VIDEO_FORMAT_NONE, DRM_FORMAT_RGB565 },
-	{ "xbgr8888", 24, 32, XILINX_VIDEO_FORMAT_NONE, DRM_FORMAT_XBGR8888 },
-	{ "abgr8888", 32, 32, XILINX_VIDEO_FORMAT_NONE, DRM_FORMAT_ABGR8888 },
+	{ "uvy422", 16, 16, XILINX_VIDEO_FORMAT_NONE, DRM_FORMAT_UYVY },
+	{ "vuy422", 16, 16, XILINX_VIDEO_FORMAT_YUV422, DRM_FORMAT_VYUY },
+	{ "yuv422", 16, 16, XILINX_VIDEO_FORMAT_YUV422, DRM_FORMAT_YUYV },
+	{ "yvu422", 16, 16, XILINX_VIDEO_FORMAT_NONE, DRM_FORMAT_YVYU },
+	{ "yuv444", 24, 24, XILINX_VIDEO_FORMAT_YUV444, DRM_FORMAT_YUV444 },
+	{ "nv12", 16, 16, XILINX_VIDEO_FORMAT_NONE, DRM_FORMAT_NV12 },
+	{ "nv21", 16, 16, XILINX_VIDEO_FORMAT_NONE, DRM_FORMAT_NV21 },
 	{ "nv16", 16, 16, XILINX_VIDEO_FORMAT_NONE, DRM_FORMAT_NV16 },
+	{ "nv61", 16, 16, XILINX_VIDEO_FORMAT_NONE, DRM_FORMAT_NV61 },
+	{ "abgr1555", 16, 16, XILINX_VIDEO_FORMAT_NONE, DRM_FORMAT_ABGR1555 },
+	{ "argb1555", 16, 16, XILINX_VIDEO_FORMAT_NONE, DRM_FORMAT_ARGB1555 },
+	{ "rgba4444", 16, 16, XILINX_VIDEO_FORMAT_NONE, DRM_FORMAT_RGBA4444 },
+	{ "bgra4444", 16, 16, XILINX_VIDEO_FORMAT_NONE, DRM_FORMAT_BGRA4444 },
+	{ "bgr565", 16, 16, XILINX_VIDEO_FORMAT_NONE, DRM_FORMAT_BGR565 },
+	{ "rgb565", 16, 16, XILINX_VIDEO_FORMAT_NONE, DRM_FORMAT_RGB565 },
+	{ "bgr888", 24, 24, XILINX_VIDEO_FORMAT_RGB, DRM_FORMAT_BGR888 },
+	{ "rgb888", 24, 24, XILINX_VIDEO_FORMAT_RGB, DRM_FORMAT_RGB888 },
+	{ "xbgr8888", 24, 32, XILINX_VIDEO_FORMAT_NONE, DRM_FORMAT_XBGR8888 },
+	{ "xrgb8888", 24, 32, XILINX_VIDEO_FORMAT_XRGB, DRM_FORMAT_XRGB8888 },
+	{ "abgr8888", 32, 32, XILINX_VIDEO_FORMAT_NONE, DRM_FORMAT_ABGR8888 },
+	{ "argb8888", 32, 32, XILINX_VIDEO_FORMAT_NONE, DRM_FORMAT_ARGB8888 },
+	{ "bgra8888", 32, 32, XILINX_VIDEO_FORMAT_NONE, DRM_FORMAT_BGRA8888 },
+	{ "rgba8888", 32, 32, XILINX_VIDEO_FORMAT_NONE, DRM_FORMAT_RGBA8888 },
 };
 
 /**
@@ -93,7 +110,7 @@ static const struct xilinx_video_format_desc xilinx_video_formats[] = {
  *
  * Return: true if the format is supported, or false
  */
-bool xilinx_drm_check_format(struct drm_device *drm, uint32_t fourcc)
+bool xilinx_drm_check_format(struct drm_device *drm, u32 fourcc)
 {
 	struct xilinx_drm_private *private = drm->dev_private;
 
@@ -108,7 +125,7 @@ bool xilinx_drm_check_format(struct drm_device *drm, uint32_t fourcc)
  *
  * Return: the corresponding DRM_FORMAT_XXX
  */
-uint32_t xilinx_drm_get_format(struct drm_device *drm)
+u32 xilinx_drm_get_format(struct drm_device *drm)
 {
 	struct xilinx_drm_private *private = drm->dev_private;
 
@@ -128,14 +145,6 @@ unsigned int xilinx_drm_get_align(struct drm_device *drm)
 	struct xilinx_drm_private *private = drm->dev_private;
 
 	return xilinx_drm_crtc_get_align(private->crtc);
-}
-
-void xilinx_drm_set_config(struct drm_device *drm, struct drm_mode_set *set)
-{
-	struct xilinx_drm_private *private = drm->dev_private;
-
-	if (private && private->fb)
-		xilinx_drm_fb_set_config(private->fb, set);
 }
 
 /* poll changed handler */
@@ -185,7 +194,7 @@ static void xilinx_drm_mode_config_init(struct drm_device *drm)
 }
 
 /* convert xilinx format to drm format by code */
-int xilinx_drm_format_by_code(unsigned int xilinx_format, uint32_t *drm_format)
+int xilinx_drm_format_by_code(unsigned int xilinx_format, u32 *drm_format)
 {
 	const struct xilinx_video_format_desc *format;
 	unsigned int i;
@@ -204,7 +213,7 @@ int xilinx_drm_format_by_code(unsigned int xilinx_format, uint32_t *drm_format)
 }
 
 /* convert xilinx format to drm format by name */
-int xilinx_drm_format_by_name(const char *name, uint32_t *drm_format)
+int xilinx_drm_format_by_name(const char *name, u32 *drm_format)
 {
 	const struct xilinx_video_format_desc *format;
 	unsigned int i;
@@ -223,7 +232,7 @@ int xilinx_drm_format_by_name(const char *name, uint32_t *drm_format)
 }
 
 /* get bpp of given format */
-unsigned int xilinx_drm_format_bpp(uint32_t drm_format)
+unsigned int xilinx_drm_format_bpp(u32 drm_format)
 {
 	const struct xilinx_video_format_desc *format;
 	unsigned int i;
@@ -238,7 +247,7 @@ unsigned int xilinx_drm_format_bpp(uint32_t drm_format)
 }
 
 /* get color depth of given format */
-unsigned int xilinx_drm_format_depth(uint32_t drm_format)
+unsigned int xilinx_drm_format_depth(u32 drm_format)
 {
 	const struct xilinx_video_format_desc *format;
 	unsigned int i;
@@ -252,125 +261,58 @@ unsigned int xilinx_drm_format_depth(uint32_t drm_format)
 	return 0;
 }
 
-/* load xilinx drm */
-static int xilinx_drm_load(struct drm_device *drm, unsigned long flags)
+static int xilinx_drm_bind(struct device *dev)
 {
-	struct xilinx_drm_private *private;
-	struct drm_encoder *encoder;
-	struct drm_connector *connector;
-	struct device_node *encoder_node;
-	struct platform_device *pdev = drm->platformdev;
-	unsigned int bpp, align, i = 0;
-	int ret;
+	struct xilinx_drm_private *private = dev_get_drvdata(dev);
+	struct drm_device *drm = private->drm;
 
-	private = devm_kzalloc(drm->dev, sizeof(*private), GFP_KERNEL);
-	if (!private)
-		return -ENOMEM;
-
-	drm_mode_config_init(drm);
-
-	/* create a xilinx crtc */
-	private->crtc = xilinx_drm_crtc_create(drm);
-	if (IS_ERR(private->crtc)) {
-		DRM_DEBUG_DRIVER("failed to create xilinx crtc\n");
-		ret = PTR_ERR(private->crtc);
-		goto err_out;
-	}
-
-	while ((encoder_node = of_parse_phandle(drm->dev->of_node,
-						"xlnx,encoder-slave", i))) {
-		encoder = xilinx_drm_encoder_create(drm, encoder_node);
-		of_node_put(encoder_node);
-		if (IS_ERR(encoder)) {
-			DRM_DEBUG_DRIVER("failed to create xilinx encoder\n");
-			ret = PTR_ERR(encoder);
-			goto err_out;
-		}
-
-		connector = xilinx_drm_connector_create(drm, encoder, i);
-		if (IS_ERR(connector)) {
-			DRM_DEBUG_DRIVER("failed to create xilinx connector\n");
-			ret = PTR_ERR(connector);
-			goto err_out;
-		}
-
-		i++;
-	}
-
-	if (i == 0) {
-		DRM_ERROR("failed to get an encoder slave node\n");
-		return -ENODEV;
-	}
-
-	ret = drm_vblank_init(drm, 1);
-	if (ret) {
-		dev_err(&pdev->dev, "failed to initialize vblank\n");
-		goto err_out;
-	}
-
-	/* enable irq to enable vblank feature */
-	drm->irq_enabled = 1;
-
-	/* allow disable vblank */
-	drm->vblank_disable_allowed = 1;
-
-	drm->dev_private = private;
-	private->drm = drm;
-
-	/* initialize xilinx framebuffer */
-	bpp = xilinx_drm_format_bpp(xilinx_drm_crtc_get_format(private->crtc));
-	align = xilinx_drm_crtc_get_align(private->crtc);
-	private->fb = xilinx_drm_fb_init(drm, bpp, 1, 1, align,
-					 xilinx_drm_fbdev_vres);
-	if (IS_ERR(private->fb)) {
-		DRM_ERROR("failed to initialize drm cma fb\n");
-		ret = PTR_ERR(private->fb);
-		goto err_fb;
-	}
-
-	drm_kms_helper_poll_init(drm);
-
-	/* set up mode config for xilinx */
-	xilinx_drm_mode_config_init(drm);
-
-	drm_helper_disable_unused_functions(drm);
-
-	platform_set_drvdata(pdev, private);
-
-	return 0;
-
-err_fb:
-	drm_vblank_cleanup(drm);
-err_out:
-	drm_mode_config_cleanup(drm);
-	if (ret == -EPROBE_DEFER)
-		DRM_INFO("load() is defered & will be called again\n");
-	return ret;
+	return component_bind_all(dev, drm);
 }
 
-/* unload xilinx drm */
-static int xilinx_drm_unload(struct drm_device *drm)
+static void xilinx_drm_unbind(struct device *dev)
 {
-	struct xilinx_drm_private *private = drm->dev_private;
+	dev_set_drvdata(dev, NULL);
+}
 
-	drm_vblank_cleanup(drm);
+static const struct component_master_ops xilinx_drm_ops = {
+	.bind	= xilinx_drm_bind,
+	.unbind	= xilinx_drm_unbind,
+};
 
-	drm_kms_helper_poll_fini(drm);
+static int compare_of(struct device *dev, void *data)
+{
+	struct device_node *np = data;
 
-	xilinx_drm_fb_fini(private->fb);
+	return dev->of_node == np;
+}
 
-	drm_mode_config_cleanup(drm);
+static int xilinx_drm_open(struct drm_device *dev, struct drm_file *file)
+{
+	struct xilinx_drm_private *private = dev->dev_private;
+
+	/* This is a hack way to allow the root user to run as a master */
+	if (!(drm_is_primary_client(file) && !dev->master) &&
+	    !file->is_master && capable(CAP_SYS_ADMIN)) {
+		file->is_master = 1;
+		private->is_master = true;
+	}
 
 	return 0;
 }
 
-/* preclose */
-static void xilinx_drm_preclose(struct drm_device *drm, struct drm_file *file)
+static int xilinx_drm_release(struct inode *inode, struct file *filp)
 {
+	struct drm_file *file = filp->private_data;
+	struct drm_minor *minor = file->minor;
+	struct drm_device *drm = minor->dev;
 	struct xilinx_drm_private *private = drm->dev_private;
 
-	/* cancel pending page flip request */
-	xilinx_drm_crtc_cancel_page_flip(private->crtc, file);
+	if (private->is_master) {
+		private->is_master = false;
+		file->is_master = 0;
+	}
+
+	return drm_release(inode, filp);
 }
 
 /* restore the default mode when xilinx drm is released */
@@ -386,7 +328,7 @@ static void xilinx_drm_lastclose(struct drm_device *drm)
 static const struct file_operations xilinx_drm_fops = {
 	.owner		= THIS_MODULE,
 	.open		= drm_open,
-	.release	= drm_release,
+	.release	= xilinx_drm_release,
 	.unlocked_ioctl	= drm_ioctl,
 	.mmap		= drm_gem_cma_mmap,
 	.poll		= drm_poll,
@@ -399,14 +341,10 @@ static const struct file_operations xilinx_drm_fops = {
 
 static struct drm_driver xilinx_drm_driver = {
 	.driver_features		= DRIVER_MODESET | DRIVER_GEM |
-					  DRIVER_PRIME,
-	.load				= xilinx_drm_load,
-	.unload				= xilinx_drm_unload,
-	.preclose			= xilinx_drm_preclose,
+					  DRIVER_PRIME | DRIVER_LEGACY,
+	.open				= xilinx_drm_open,
 	.lastclose			= xilinx_drm_lastclose,
-	.set_busid			= drm_platform_set_busid,
 
-	.get_vblank_counter		= drm_vblank_no_hw_counter,
 	.enable_vblank			= xilinx_drm_enable_vblank,
 	.disable_vblank			= xilinx_drm_disable_vblank,
 
@@ -422,8 +360,6 @@ static struct drm_driver xilinx_drm_driver = {
 	.gem_free_object		= drm_gem_cma_free_object,
 	.gem_vm_ops			= &drm_gem_cma_vm_ops,
 	.dumb_create			= xilinx_drm_gem_cma_dumb_create,
-	.dumb_map_offset		= drm_gem_cma_dumb_map_offset,
-	.dumb_destroy			= drm_gem_dumb_destroy,
 
 	.fops				= &xilinx_drm_fops,
 
@@ -434,7 +370,7 @@ static struct drm_driver xilinx_drm_driver = {
 	.minor				= DRIVER_MINOR,
 };
 
-#if defined(CONFIG_PM_SLEEP) || defined(CONFIG_PM_RUNTIME)
+#if defined(CONFIG_PM_SLEEP)
 /* suspend xilinx drm */
 static int xilinx_drm_pm_suspend(struct device *dev)
 {
@@ -474,7 +410,12 @@ static int xilinx_drm_pm_resume(struct device *dev)
 			connector->funcs->dpms(connector, dpms);
 		}
 	}
-	drm_kms_helper_poll_enable_locked(drm);
+	drm_modeset_unlock_all(drm);
+
+	drm_helper_resume_force_mode(drm);
+
+	drm_modeset_lock_all(drm);
+	drm_kms_helper_poll_enable(drm);
 	drm_modeset_unlock_all(drm);
 
 	return 0;
@@ -483,23 +424,169 @@ static int xilinx_drm_pm_resume(struct device *dev)
 
 static const struct dev_pm_ops xilinx_drm_pm_ops = {
 	SET_SYSTEM_SLEEP_PM_OPS(xilinx_drm_pm_suspend, xilinx_drm_pm_resume)
-	SET_RUNTIME_PM_OPS(xilinx_drm_pm_suspend, xilinx_drm_pm_resume, NULL)
 };
 
 /* init xilinx drm platform */
 static int xilinx_drm_platform_probe(struct platform_device *pdev)
 {
-	return drm_platform_init(&xilinx_drm_driver, pdev);
+	struct xilinx_drm_private *private;
+	struct drm_device *drm;
+	struct drm_encoder *encoder;
+	struct drm_connector *connector;
+	const struct drm_format_info *info;
+	struct device_node *encoder_node, *ep = NULL, *remote;
+	struct component_match *match = NULL;
+	unsigned int align, i = 0;
+	int ret;
+	u32 format;
+
+	drm = drm_dev_alloc(&xilinx_drm_driver, &pdev->dev);
+	if (IS_ERR(drm))
+		return PTR_ERR(drm);
+
+	private = devm_kzalloc(drm->dev, sizeof(*private), GFP_KERNEL);
+	if (!private) {
+		ret = -ENOMEM;
+		goto err_drm;
+	}
+
+	drm_mode_config_init(drm);
+
+	/* create a xilinx crtc */
+	private->crtc = xilinx_drm_crtc_create(drm);
+	if (IS_ERR(private->crtc)) {
+		DRM_DEBUG_DRIVER("failed to create xilinx crtc\n");
+		ret = PTR_ERR(private->crtc);
+		goto err_config;
+	}
+
+	while ((encoder_node = of_parse_phandle(drm->dev->of_node,
+						"xlnx,encoder-slave", i))) {
+		encoder = xilinx_drm_encoder_create(drm, encoder_node);
+		of_node_put(encoder_node);
+		if (IS_ERR(encoder)) {
+			DRM_DEBUG_DRIVER("failed to create xilinx encoder\n");
+			ret = PTR_ERR(encoder);
+			goto err_config;
+		}
+
+		connector = xilinx_drm_connector_create(drm, encoder, i);
+		if (IS_ERR(connector)) {
+			DRM_DEBUG_DRIVER("failed to create xilinx connector\n");
+			ret = PTR_ERR(connector);
+			goto err_config;
+		}
+
+		i++;
+	}
+
+	while (1) {
+		ep = of_graph_get_next_endpoint(drm->dev->of_node, ep);
+		if (!ep)
+			break;
+
+		of_node_put(ep);
+		remote = of_graph_get_remote_port_parent(ep);
+		if (!remote || !of_device_is_available(remote)) {
+			of_node_put(remote);
+			continue;
+		}
+
+		component_match_add(drm->dev, &match, compare_of, remote);
+		of_node_put(remote);
+		i++;
+	}
+
+	if (i == 0) {
+		DRM_ERROR("failed to get an encoder slave node\n");
+		return -ENODEV;
+	}
+
+	ret = drm_vblank_init(drm, 1);
+	if (ret) {
+		dev_err(&pdev->dev, "failed to initialize vblank\n");
+		goto err_master;
+	}
+
+	/* enable irq to enable vblank feature */
+	drm->irq_enabled = 1;
+
+	drm->dev_private = private;
+	private->drm = drm;
+	xilinx_drm_mode_config_init(drm);
+
+	format = xilinx_drm_crtc_get_format(private->crtc);
+	info = drm_format_info(format);
+	if (info && info->depth && info->cpp[0]) {
+		align = xilinx_drm_crtc_get_align(private->crtc);
+		private->fb = xilinx_drm_fb_init(drm, info->cpp[0] * 8, 1,
+						 align, xilinx_drm_fbdev_vres);
+		if (IS_ERR(private->fb)) {
+			DRM_ERROR("failed to initialize drm fb\n");
+			private->fb = NULL;
+		}
+	} else {
+		dev_info(&pdev->dev, "fbdev is not initialized\n");
+	}
+
+	drm_kms_helper_poll_init(drm);
+
+	drm_helper_disable_unused_functions(drm);
+
+	platform_set_drvdata(pdev, private);
+
+	if (match) {
+		ret = component_master_add_with_match(drm->dev,
+						      &xilinx_drm_ops, match);
+		if (ret)
+			goto err_master;
+	}
+
+	ret = dma_set_coherent_mask(&pdev->dev,
+				    DMA_BIT_MASK(sizeof(dma_addr_t) * 8));
+	if (ret) {
+		dev_info(&pdev->dev, "failed to set coherent mask (%zu)\n",
+			 sizeof(dma_addr_t));
+	}
+
+	ret = drm_dev_register(drm, 0);
+	if (ret < 0)
+		goto err_master;
+
+	return 0;
+
+err_master:
+	component_master_del(drm->dev, &xilinx_drm_ops);
+err_config:
+	drm_mode_config_cleanup(drm);
+	if (ret == -EPROBE_DEFER)
+		DRM_INFO("load() is defered & will be called again\n");
+err_drm:
+	drm_dev_unref(drm);
+	return ret;
 }
 
 /* exit xilinx drm platform */
 static int xilinx_drm_platform_remove(struct platform_device *pdev)
 {
 	struct xilinx_drm_private *private = platform_get_drvdata(pdev);
+	struct drm_device *drm = private->drm;
 
-	drm_put_dev(private->drm);
+	component_master_del(drm->dev, &xilinx_drm_ops);
+	drm_kms_helper_poll_fini(drm);
+	xilinx_drm_fb_fini(private->fb);
+	drm_mode_config_cleanup(drm);
+	drm->dev_private = NULL;
+	drm_dev_unref(private->drm);
 
 	return 0;
+}
+
+static void xilinx_drm_platform_shutdown(struct platform_device *pdev)
+{
+	struct xilinx_drm_private *private = platform_get_drvdata(pdev);
+
+	drm_put_dev(private->drm);
 }
 
 static const struct of_device_id xilinx_drm_of_match[] = {
@@ -511,6 +598,7 @@ MODULE_DEVICE_TABLE(of, xilinx_drm_of_match);
 static struct platform_driver xilinx_drm_private_driver = {
 	.probe			= xilinx_drm_platform_probe,
 	.remove			= xilinx_drm_platform_remove,
+	.shutdown		= xilinx_drm_platform_shutdown,
 	.driver			= {
 		.name		= "xilinx-drm",
 		.pm		= &xilinx_drm_pm_ops,

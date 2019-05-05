@@ -63,7 +63,22 @@ static void _add_clkdev(struct omap_device *od, const char *clk_alias,
 		return;
 	}
 
-	rc = clk_add_alias(clk_alias, dev_name(&od->pdev->dev), clk_name, NULL);
+	r = clk_get_sys(NULL, clk_name);
+
+	if (IS_ERR(r)) {
+		struct of_phandle_args clkspec;
+
+		clkspec.np = of_find_node_by_name(NULL, clk_name);
+
+		r = of_clk_get_from_provider(&clkspec);
+
+		rc = clk_register_clkdev(r, clk_alias,
+					 dev_name(&od->pdev->dev));
+	} else {
+		rc = clk_add_alias(clk_alias, dev_name(&od->pdev->dev),
+				   clk_name, NULL);
+	}
+
 	if (rc) {
 		if (rc == -ENODEV || rc == -ENOMEM)
 			dev_err(&od->pdev->dev,
@@ -194,7 +209,7 @@ static int _omap_device_notifier_call(struct notifier_block *nb,
 	int err;
 
 	switch (event) {
-	case BUS_NOTIFY_DEL_DEVICE:
+	case BUS_NOTIFY_REMOVED_DEVICE:
 		if (pdev->archdata.od)
 			omap_device_delete(pdev->archdata.od);
 		break;
@@ -205,6 +220,14 @@ static int _omap_device_notifier_call(struct notifier_block *nb,
 			err = omap_device_idle(pdev);
 			if (err)
 				dev_err(dev, "failed to idle\n");
+		}
+		break;
+	case BUS_NOTIFY_BIND_DRIVER:
+		od = to_omap_device(pdev);
+		if (od && (od->_state == OMAP_DEVICE_STATE_ENABLED) &&
+		    pm_runtime_status_suspended(dev)) {
+			od->_driver_status = BUS_NOTIFY_BIND_DRIVER;
+			pm_runtime_set_active(dev);
 		}
 		break;
 	case BUS_NOTIFY_ADD_DEVICE:
@@ -268,7 +291,7 @@ static int _omap_device_idle_hwmods(struct omap_device *od)
  * function returns a value different than the value the caller got
  * the last time it called this function.
  *
- * If any hwmods exist for the omap_device assoiated with @pdev,
+ * If any hwmods exist for the omap_device associated with @pdev,
  * return the context loss counter for that hwmod, otherwise return
  * zero.
  */
@@ -649,7 +672,6 @@ static int _od_suspend_noirq(struct device *dev)
 
 	if (!ret && !pm_runtime_status_suspended(dev)) {
 		if (pm_generic_runtime_suspend(dev) == 0) {
-			pm_runtime_set_suspended(dev);
 			omap_device_idle(pdev);
 			od->flags |= OMAP_DEVICE_SUSPENDED;
 		}
@@ -666,15 +688,6 @@ static int _od_resume_noirq(struct device *dev)
 	if (od->flags & OMAP_DEVICE_SUSPENDED) {
 		od->flags &= ~OMAP_DEVICE_SUSPENDED;
 		omap_device_enable(pdev);
-		/*
-		 * XXX: we run before core runtime pm has resumed itself. At
-		 * this point in time, we just restore the runtime pm state and
-		 * considering symmetric operations in resume, we donot expect
-		 * to fail. If we failed, something changed in core runtime_pm
-		 * framework OR some device driver messed things up, hence, WARN
-		 */
-		WARN(pm_runtime_set_active(dev),
-		     "Could not set %s runtime state active\n", dev_name(dev));
 		pm_generic_runtime_resume(dev);
 	}
 
@@ -929,9 +942,6 @@ static int __init omap_device_late_idle(struct device *dev, void *data)
 static int __init omap_device_late_init(void)
 {
 	bus_for_each_dev(&platform_bus_type, NULL, NULL, omap_device_late_idle);
-
-	WARN(!of_have_populated_dt(),
-		"legacy booting deprecated, please update to boot with .dts\n");
 
 	return 0;
 }

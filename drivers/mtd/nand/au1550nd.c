@@ -14,7 +14,7 @@
 #include <linux/module.h>
 #include <linux/interrupt.h>
 #include <linux/mtd/mtd.h>
-#include <linux/mtd/nand.h>
+#include <linux/mtd/rawnand.h>
 #include <linux/mtd/partitions.h>
 #include <linux/platform_device.h>
 #include <asm/io.h>
@@ -459,6 +459,7 @@ static int au1550nd_probe(struct platform_device *pdev)
 	/* 30 us command delay time */
 	this->chip_delay = 30;
 	this->ecc.mode = NAND_ECC_SOFT;
+	this->ecc.algo = NAND_ECC_HAMMING;
 
 	if (pd->devwidth)
 		this->options |= NAND_BUSWIDTH_16;

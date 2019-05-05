@@ -362,6 +362,20 @@ struct xilinx_dma_chan {
 	u16 tdest;
 };
 
+/**
+ * enum xdma_ip_type: DMA IP type.
+ *
+ * XDMA_TYPE_AXIDMA: Axi dma ip.
+ * XDMA_TYPE_CDMA: Axi cdma ip.
+ * XDMA_TYPE_VDMA: Axi vdma ip.
+ *
+ */
+enum xdma_ip_type {
+	XDMA_TYPE_AXIDMA = 0,
+	XDMA_TYPE_CDMA,
+	XDMA_TYPE_VDMA,
+};
+
 struct xilinx_dma_ip_config {
 	enum xdma_ip_type dmatype;
 	int (*clk_init)(struct platform_device *pdev, struct clk **axi_clk,
@@ -1161,8 +1175,10 @@ static void xilinx_cdma_start_transfer(struct xilinx_dma_chan *chan)
 
 		hw = &segment->hw;
 
-		xilinx_write(chan, XILINX_CDMA_REG_SRCADDR, hw->src_addr);
-		xilinx_write(chan, XILINX_CDMA_REG_DSTADDR, hw->dest_addr);
+		xilinx_write(chan, XILINX_CDMA_REG_SRCADDR, (dma_addr_t)
+			     ((u64)hw->src_addr_msb << 32 | hw->src_addr));
+		xilinx_write(chan, XILINX_CDMA_REG_DSTADDR, (dma_addr_t)
+			     ((u64)hw->dest_addr_msb << 32 | hw->dest_addr));
 
 		/* Start the transfer */
 		dma_ctrl_write(chan, XILINX_DMA_REG_BTT,

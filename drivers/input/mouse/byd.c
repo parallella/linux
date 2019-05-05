@@ -344,7 +344,7 @@ static int byd_reset_touchpad(struct psmouse *psmouse)
 	u8 param[4];
 	size_t i;
 
-	const struct {
+	static const struct {
 		u16 command;
 		u8 arg;
 	} seq[] = {
@@ -478,7 +478,6 @@ int byd_init(struct psmouse *psmouse)
 	if (!priv)
 		return -ENOMEM;
 
-	memset(priv, 0, sizeof(*priv));
 	setup_timer(&priv->timer, byd_clear_touch, (unsigned long) psmouse);
 
 	psmouse->private = priv;

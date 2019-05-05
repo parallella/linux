@@ -141,8 +141,6 @@ static int axiadc_probe(struct platform_device *pdev)
 	if (ret)
 		goto err_unconfigure_ring;
 
-	*indio_dev->buffer->scan_mask = (1UL << chip_info->num_channels) - 1;
-
 	dev_info(&pdev->dev, "ADI AIM (0x%X) at 0x%08llX mapped to 0x%p, probed ADC %s as %s\n",
 		 st->pcore_version, (unsigned long long)mem->start, st->regs,
 		 chip_info->name, axiadc_read(st, ADI_REG_ID) ? "SLAVE" : "MASTER");
@@ -160,7 +158,7 @@ static int axiadc_remove(struct platform_device *pdev)
 	struct iio_dev *indio_dev = platform_get_drvdata(pdev);
 
 	iio_device_unregister(indio_dev);
-	axiadc_unconfigure_ring(indio_dev);
+	axiadc_unconfigure_ring_stream(indio_dev);
 
 	return 0;
 }

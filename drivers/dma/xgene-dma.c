@@ -391,11 +391,6 @@ static void xgene_dma_set_src_buffer(__le64 *ext8, size_t *len,
 	*paddr += nbytes;
 }
 
-static void xgene_dma_invalidate_buffer(__le64 *ext8)
-{
-	*ext8 |= cpu_to_le64(XGENE_DMA_INVALID_LEN_CODE);
-}
-
 static __le64 *xgene_dma_lookup_ext8(struct xgene_dma_desc_hw *desc, int idx)
 {
 	switch (idx) {
@@ -606,12 +601,10 @@ static void xgene_dma_run_tx_complete_actions(struct xgene_dma_chan *chan,
 		return;
 
 	dma_cookie_complete(tx);
+	dma_descriptor_unmap(tx);
 
 	/* Run the link descriptor callback function */
-	if (tx->callback)
-		tx->callback(tx->callback_param);
-
-	dma_descriptor_unmap(tx);
+	dmaengine_desc_get_callback_invoke(tx, NULL);
 
 	/* Run any dependencies */
 	dma_run_dependencies(tx);

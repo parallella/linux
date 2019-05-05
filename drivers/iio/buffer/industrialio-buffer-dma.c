@@ -14,6 +14,7 @@
 #include <linux/sched.h>
 #include <linux/poll.h>
 #include <linux/iio/buffer.h>
+#include <linux/iio/buffer_impl.h>
 #include <linux/iio/buffer-dma.h>
 #include <linux/dma-mapping.h>
 #include <linux/sizes.h>
@@ -90,6 +91,9 @@
  * driver chooses to overload a callback it has to ensure that the generic
  * callback is called from within the custom callback.
  */
+
+static unsigned int iio_dma_buffer_max_block_size = SZ_16M;
+module_param_named(max_block_size, iio_dma_buffer_max_block_size, uint, 0644);
 
 static void iio_buffer_block_release(struct kref *kref)
 {
@@ -221,7 +225,7 @@ void iio_dma_buffer_block_done(struct iio_dma_buffer_block *block)
 	spin_unlock_irqrestore(&queue->list_lock, flags);
 
 	iio_buffer_block_put_atomic(block);
-	wake_up_interruptible_poll(&queue->buffer.pollq, queue->poll_wakup_flags);
+	wake_up_interruptible_poll(&queue->buffer.pollq, (uintptr_t)queue->poll_wakup_flags);
 }
 EXPORT_SYMBOL_GPL(iio_dma_buffer_block_done);
 
@@ -602,8 +606,8 @@ int iio_dma_buffer_alloc_blocks(struct iio_buffer *buffer,
 	/* 64 blocks ought to be enough for anybody ;) */
 	if (req->count > 64 - queue->num_blocks)
 		req->count = 64 - queue->num_blocks;
-	if (req->size > SZ_16M)
-		req->size = SZ_16M;
+	if (req->size > iio_dma_buffer_max_block_size)
+		req->size = iio_dma_buffer_max_block_size;
 
 	req->id = queue->num_blocks;
 
@@ -648,9 +652,6 @@ int iio_dma_buffer_free_blocks(struct iio_buffer *buffer)
 
 	mutex_lock(&queue->lock);
 
-	if (!queue->num_blocks)
-		goto out_unlock;
-
 	spin_lock_irq(&queue->list_lock);
 	INIT_LIST_HEAD(&queue->incoming);
 	INIT_LIST_HEAD(&queue->outgoing);
@@ -666,8 +667,6 @@ int iio_dma_buffer_free_blocks(struct iio_buffer *buffer)
 	queue->blocks = NULL;
 	queue->num_blocks = 0;
 	queue->max_offset = 0;
-
-out_unlock:
 
 	mutex_unlock(&queue->lock);
 

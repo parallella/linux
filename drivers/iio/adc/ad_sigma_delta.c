@@ -59,7 +59,7 @@ EXPORT_SYMBOL_GPL(ad_sd_set_comm);
 int ad_sd_write_reg(struct ad_sigma_delta *sigma_delta, unsigned int reg,
 	unsigned int size, unsigned int val)
 {
-	uint8_t *data = sigma_delta->reg_data;
+	uint8_t *data = sigma_delta->data;
 	struct spi_transfer t = {
 		.tx_buf		= data,
 		.len		= size + 1,
@@ -130,7 +130,7 @@ static int ad_sd_read_reg_raw(struct ad_sigma_delta *sigma_delta,
 	int ret;
 
 	ad_sd_prepare_read_reg(sigma_delta, &m, t, reg, size,
-		sigma_delta->reg_data, val, sigma_delta->keep_cs_asserted);
+		sigma_delta->data, val, sigma_delta->keep_cs_asserted);
 
 	if (sigma_delta->bus_locked)
 		ret = spi_sync_locked(sigma_delta->spi, &m);
@@ -155,24 +155,24 @@ int ad_sd_read_reg(struct ad_sigma_delta *sigma_delta,
 {
 	int ret;
 
-	ret = ad_sd_read_reg_raw(sigma_delta, reg, size, sigma_delta->reg_data);
+	ret = ad_sd_read_reg_raw(sigma_delta, reg, size, sigma_delta->data);
 	if (ret < 0)
 		goto out;
 
 	switch (size) {
 	case 4:
-		*val = get_unaligned_be32(sigma_delta->reg_data);
+		*val = get_unaligned_be32(sigma_delta->data);
 		break;
 	case 3:
-		*val = (sigma_delta->reg_data[0] << 16) |
-			(sigma_delta->reg_data[1] << 8) |
-			sigma_delta->reg_data[2];
+		*val = (sigma_delta->data[0] << 16) |
+			(sigma_delta->data[1] << 8) |
+			sigma_delta->data[2];
 		break;
 	case 2:
-		*val = get_unaligned_be16(sigma_delta->reg_data);
+		*val = get_unaligned_be16(sigma_delta->data);
 		break;
 	case 1:
-		*val = sigma_delta->reg_data[0];
+		*val = sigma_delta->data[0];
 		break;
 	default:
 		ret = -EINVAL;
@@ -183,6 +183,34 @@ out:
 	return ret;
 }
 EXPORT_SYMBOL_GPL(ad_sd_read_reg);
+
+/**
+ * ad_sd_reset() - Reset the serial interface
+ *
+ * @sigma_delta: The sigma delta device
+ * @reset_length: Number of SCLKs with DIN = 1
+ *
+ * Returns 0 on success, an error code otherwise.
+ **/
+int ad_sd_reset(struct ad_sigma_delta *sigma_delta,
+	unsigned int reset_length)
+{
+	uint8_t *buf;
+	unsigned int size;
+	int ret;
+
+	size = DIV_ROUND_UP(reset_length, 8);
+	buf = kcalloc(size, sizeof(*buf), GFP_KERNEL);
+	if (!buf)
+		return -ENOMEM;
+
+	memset(buf, 0xff, size);
+	ret = spi_write(sigma_delta->spi, buf, size);
+	kfree(buf);
+
+	return ret;
+}
+EXPORT_SYMBOL_GPL(ad_sd_reset);
 
 static int ad_sd_calibrate(struct ad_sigma_delta *sigma_delta,
 	unsigned int mode, unsigned int channel)
@@ -589,8 +617,7 @@ int ad_sd_setup_buffer_and_trigger(struct iio_dev *indio_dev)
 		indio_dev->modes |= INDIO_BUFFER_HARDWARE;
 
 	ret = iio_triggered_buffer_setup(indio_dev, &iio_pollfunc_store_time,
-			&ad_sd_trigger_handler, &ad_sd_buffer_setup_ops
-			);
+			&ad_sd_trigger_handler, &ad_sd_buffer_setup_ops);
 	if (ret)
 		return ret;
 

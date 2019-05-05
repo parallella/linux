@@ -17,6 +17,7 @@
 #include <linux/of.h>
 #include <linux/cpufeature.h>
 #include <linux/tick.h>
+#include <linux/pm_qos.h>
 
 #include "base.h"
 
@@ -255,9 +256,9 @@ static ssize_t print_cpus_offline(struct device *dev,
 			buf[n++] = ',';
 
 		if (nr_cpu_ids == total_cpus-1)
-			n += snprintf(&buf[n], len - n, "%d", nr_cpu_ids);
+			n += snprintf(&buf[n], len - n, "%u", nr_cpu_ids);
 		else
-			n += snprintf(&buf[n], len - n, "%d-%d",
+			n += snprintf(&buf[n], len - n, "%u-%d",
 						      nr_cpu_ids, total_cpus-1);
 	}
 
@@ -371,12 +372,14 @@ int register_cpu(struct cpu *cpu, int num)
 	if (cpu->hotpluggable)
 		cpu->dev.groups = hotplugable_cpu_attr_groups;
 	error = device_register(&cpu->dev);
-	if (!error)
-		per_cpu(cpu_sys_devices, num) = &cpu->dev;
-	if (!error)
-		register_cpu_under_node(num, cpu_to_node(num));
+	if (error)
+		return error;
 
-	return error;
+	per_cpu(cpu_sys_devices, num) = &cpu->dev;
+	register_cpu_under_node(num, cpu_to_node(num));
+	dev_pm_qos_expose_latency_limit(&cpu->dev, 0);
+
+	return 0;
 }
 
 struct device *get_cpu_device(unsigned cpu)

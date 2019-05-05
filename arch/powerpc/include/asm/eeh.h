@@ -57,7 +57,7 @@ struct pci_dn;
 /*
  * The struct is used to trace PE related EEH functionality.
  * In theory, there will have one instance of the struct to
- * be created against particular PE. In nature, PEs corelate
+ * be created against particular PE. In nature, PEs correlate
  * to each other. the struct has to reflect that hierarchy in
  * order to easily pick up those affected PEs when one particular
  * PE has EEH errors.
@@ -131,7 +131,6 @@ static inline bool eeh_pe_passed(struct eeh_pe *pe)
 struct eeh_dev {
 	int mode;			/* EEH mode			*/
 	int class_code;			/* Class code of the device	*/
-	int config_addr;		/* Config address		*/
 	int pe_config_addr;		/* PE config address		*/
 	u32 config_space[16];		/* Saved PCI config space	*/
 	int pcix_cap;			/* Saved PCIx capability	*/
@@ -141,7 +140,6 @@ struct eeh_dev {
 	struct eeh_pe *pe;		/* Associated PE		*/
 	struct list_head list;		/* Form link list in the PE	*/
 	struct list_head rmv_list;	/* Record the removed edevs	*/
-	struct pci_controller *phb;	/* Associated PHB		*/
 	struct pci_dn *pdn;		/* Associated PCI device node	*/
 	struct pci_dev *pdev;		/* Associated PCI device	*/
 	bool in_error;			/* Error flag for edev		*/
@@ -262,7 +260,8 @@ typedef void *(*eeh_traverse_func)(void *data, void *flag);
 void eeh_set_pe_aux_size(int size);
 int eeh_phb_pe_create(struct pci_controller *phb);
 struct eeh_pe *eeh_phb_pe_get(struct pci_controller *phb);
-struct eeh_pe *eeh_pe_get(struct eeh_dev *edev);
+struct eeh_pe *eeh_pe_get(struct pci_controller *phb,
+			  int pe_no, int config_addr);
 int eeh_add_to_parent_pe(struct eeh_dev *edev);
 int eeh_rmv_from_parent_pe(struct eeh_dev *edev);
 void eeh_pe_update_time_stamp(struct eeh_pe *pe);
@@ -274,7 +273,7 @@ void eeh_pe_restore_bars(struct eeh_pe *pe);
 const char *eeh_pe_loc_get(struct eeh_pe *pe);
 struct pci_bus *eeh_pe_bus_get(struct eeh_pe *pe);
 
-void *eeh_dev_init(struct pci_dn *pdn, void *data);
+struct eeh_dev *eeh_dev_init(struct pci_dn *pdn);
 void eeh_dev_phb_init_dynamic(struct pci_controller *phb);
 int eeh_init(void);
 int __init eeh_ops_register(struct eeh_ops *ops);

@@ -469,9 +469,9 @@ static void adjust_link_memac(struct net_device *net_dev)
 /* Initializes driver's PHY state, and attaches to the PHY.
  * Returns 0 on success.
  */
-static int init_phy(struct net_device *net_dev,
-		    struct mac_device *mac_dev,
-		    void (*adj_lnk)(struct net_device *))
+static struct phy_device *init_phy(struct net_device *net_dev,
+				   struct mac_device *mac_dev,
+				   void (*adj_lnk)(struct net_device *))
 {
 	struct phy_device	*phy_dev;
 	struct mac_priv_s	*priv = mac_dev->priv;
@@ -480,7 +480,7 @@ static int init_phy(struct net_device *net_dev,
 				 priv->phy_if);
 	if (!phy_dev) {
 		netdev_err(net_dev, "Could not connect to PHY\n");
-		return -ENODEV;
+		return NULL;
 	}
 
 	/* Remove any features not supported by the controller */
@@ -493,23 +493,23 @@ static int init_phy(struct net_device *net_dev,
 
 	mac_dev->phy_dev = phy_dev;
 
-	return 0;
+	return phy_dev;
 }
 
-static int dtsec_init_phy(struct net_device *net_dev,
-			  struct mac_device *mac_dev)
+static struct phy_device *dtsec_init_phy(struct net_device *net_dev,
+					 struct mac_device *mac_dev)
 {
 	return init_phy(net_dev, mac_dev, &adjust_link_dtsec);
 }
 
-static int tgec_init_phy(struct net_device *net_dev,
-			 struct mac_device *mac_dev)
+static struct phy_device *tgec_init_phy(struct net_device *net_dev,
+					struct mac_device *mac_dev)
 {
 	return init_phy(net_dev, mac_dev, adjust_link_void);
 }
 
-static int memac_init_phy(struct net_device *net_dev,
-			  struct mac_device *mac_dev)
+static struct phy_device *memac_init_phy(struct net_device *net_dev,
+					 struct mac_device *mac_dev)
 {
 	return init_phy(net_dev, mac_dev, &adjust_link_memac);
 }
@@ -583,31 +583,6 @@ static void setup_memac(struct mac_device *mac_dev)
 
 static DEFINE_MUTEX(eth_lock);
 
-static const char phy_str[][11] = {
-	[PHY_INTERFACE_MODE_MII]		= "mii",
-	[PHY_INTERFACE_MODE_GMII]		= "gmii",
-	[PHY_INTERFACE_MODE_SGMII]		= "sgmii",
-	[PHY_INTERFACE_MODE_TBI]		= "tbi",
-	[PHY_INTERFACE_MODE_RMII]		= "rmii",
-	[PHY_INTERFACE_MODE_RGMII]		= "rgmii",
-	[PHY_INTERFACE_MODE_RGMII_ID]		= "rgmii-id",
-	[PHY_INTERFACE_MODE_RGMII_RXID]	= "rgmii-rxid",
-	[PHY_INTERFACE_MODE_RGMII_TXID]	= "rgmii-txid",
-	[PHY_INTERFACE_MODE_RTBI]		= "rtbi",
-	[PHY_INTERFACE_MODE_XGMII]		= "xgmii"
-};
-
-static phy_interface_t __pure __attribute__((nonnull)) str2phy(const char *str)
-{
-	int i;
-
-	for (i = 0; i < ARRAY_SIZE(phy_str); i++)
-		if (strcmp(str, phy_str[i]) == 0)
-			return (phy_interface_t)i;
-
-	return PHY_INTERFACE_MODE_MII;
-}
-
 static const u16 phy2speed[] = {
 	[PHY_INTERFACE_MODE_MII]		= SPEED_100,
 	[PHY_INTERFACE_MODE_GMII]		= SPEED_1000,
@@ -619,6 +594,7 @@ static const u16 phy2speed[] = {
 	[PHY_INTERFACE_MODE_RGMII_RXID]	= SPEED_1000,
 	[PHY_INTERFACE_MODE_RGMII_TXID]	= SPEED_1000,
 	[PHY_INTERFACE_MODE_RTBI]		= SPEED_1000,
+	[PHY_INTERFACE_MODE_QSGMII]		= SPEED_1000,
 	[PHY_INTERFACE_MODE_XGMII]		= SPEED_10000
 };
 
@@ -646,6 +622,10 @@ static struct platform_device *dpaa_eth_add_device(int fman_id,
 		ret = -ENOMEM;
 		goto no_mem;
 	}
+
+	pdev->dev.of_node = node;
+	pdev->dev.parent = priv->dev;
+	set_dma_ops(&pdev->dev, get_dma_ops(priv->dev));
 
 	ret = platform_device_add_data(pdev, &data, sizeof(data));
 	if (ret)
@@ -678,7 +658,7 @@ MODULE_DEVICE_TABLE(of, mac_match);
 
 static int mac_probe(struct platform_device *_of_dev)
 {
-	int			 err, i, lenp, nph;
+	int			 err, i, nph;
 	struct device		*dev;
 	struct device_node	*mac_node, *dev_node;
 	struct mac_device	*mac_dev;
@@ -686,9 +666,9 @@ static int mac_probe(struct platform_device *_of_dev)
 	struct resource		 res;
 	struct mac_priv_s	*priv;
 	const u8		*mac_addr;
-	const char		*char_prop;
-	const u32		*u32_prop;
+	u32			 val;
 	u8			fman_id;
+	int			phy_if;
 
 	dev = &_of_dev->dev;
 	mac_node = dev->of_node;
@@ -720,8 +700,8 @@ static int mac_probe(struct platform_device *_of_dev)
 		priv->internal_phy_node = of_parse_phandle(mac_node,
 							  "pcsphy-handle", 0);
 	} else {
-		dev_err(dev, "MAC node (%s) contains unsupported MAC\n",
-			mac_node->full_name);
+		dev_err(dev, "MAC node (%pOF) contains unsupported MAC\n",
+			mac_node);
 		err = -EINVAL;
 		goto _return;
 	}
@@ -734,35 +714,32 @@ static int mac_probe(struct platform_device *_of_dev)
 	/* Get the FM node */
 	dev_node = of_get_parent(mac_node);
 	if (!dev_node) {
-		dev_err(dev, "of_get_parent(%s) failed\n",
-			mac_node->full_name);
+		dev_err(dev, "of_get_parent(%pOF) failed\n",
+			mac_node);
 		err = -EINVAL;
 		goto _return_dev_set_drvdata;
 	}
 
 	of_dev = of_find_device_by_node(dev_node);
 	if (!of_dev) {
-		dev_err(dev, "of_find_device_by_node(%s) failed\n",
-			dev_node->full_name);
+		dev_err(dev, "of_find_device_by_node(%pOF) failed\n", dev_node);
 		err = -EINVAL;
 		goto _return_of_node_put;
 	}
 
 	/* Get the FMan cell-index */
-	u32_prop = of_get_property(dev_node, "cell-index", &lenp);
-	if (!u32_prop) {
-		dev_err(dev, "of_get_property(%s, cell-index) failed\n",
-			dev_node->full_name);
+	err = of_property_read_u32(dev_node, "cell-index", &val);
+	if (err) {
+		dev_err(dev, "failed to read cell-index for %pOF\n", dev_node);
 		err = -EINVAL;
 		goto _return_of_node_put;
 	}
-	WARN_ON(lenp != sizeof(u32));
 	/* cell-index 0 => FMan id 1 */
-	fman_id = (u8)(fdt32_to_cpu(u32_prop[0]) + 1);
+	fman_id = (u8)(val + 1);
 
 	priv->fman = fman_bind(&of_dev->dev);
 	if (!priv->fman) {
-		dev_err(dev, "fman_bind(%s) failed\n", dev_node->full_name);
+		dev_err(dev, "fman_bind(%pOF) failed\n", dev_node);
 		err = -ENODEV;
 		goto _return_of_node_put;
 	}
@@ -772,8 +749,8 @@ static int mac_probe(struct platform_device *_of_dev)
 	/* Get the address of the memory mapped registers */
 	err = of_address_to_resource(mac_node, 0, &res);
 	if (err < 0) {
-		dev_err(dev, "of_address_to_resource(%s) = %d\n",
-			mac_node->full_name, err);
+		dev_err(dev, "of_address_to_resource(%pOF) = %d\n",
+			mac_node, err);
 		goto _return_dev_set_drvdata;
 	}
 
@@ -805,21 +782,18 @@ static int mac_probe(struct platform_device *_of_dev)
 	}
 
 	/* Get the cell-index */
-	u32_prop = of_get_property(mac_node, "cell-index", &lenp);
-	if (!u32_prop) {
-		dev_err(dev, "of_get_property(%s, cell-index) failed\n",
-			mac_node->full_name);
+	err = of_property_read_u32(mac_node, "cell-index", &val);
+	if (err) {
+		dev_err(dev, "failed to read cell-index for %pOF\n", mac_node);
 		err = -EINVAL;
 		goto _return_dev_set_drvdata;
 	}
-	WARN_ON(lenp != sizeof(u32));
-	priv->cell_index = (u8)fdt32_to_cpu(u32_prop[0]);
+	priv->cell_index = (u8)val;
 
 	/* Get the MAC address */
 	mac_addr = of_get_mac_address(mac_node);
 	if (!mac_addr) {
-		dev_err(dev, "of_get_mac_address(%s) failed\n",
-			mac_node->full_name);
+		dev_err(dev, "of_get_mac_address(%pOF) failed\n", mac_node);
 		err = -EINVAL;
 		goto _return_dev_set_drvdata;
 	}
@@ -828,15 +802,15 @@ static int mac_probe(struct platform_device *_of_dev)
 	/* Get the port handles */
 	nph = of_count_phandle_with_args(mac_node, "fsl,fman-ports", NULL);
 	if (unlikely(nph < 0)) {
-		dev_err(dev, "of_count_phandle_with_args(%s, fsl,fman-ports) failed\n",
-			mac_node->full_name);
+		dev_err(dev, "of_count_phandle_with_args(%pOF, fsl,fman-ports) failed\n",
+			mac_node);
 		err = nph;
 		goto _return_dev_set_drvdata;
 	}
 
 	if (nph != ARRAY_SIZE(mac_dev->port)) {
-		dev_err(dev, "Not supported number of fman-ports handles of mac node %s from device tree\n",
-			mac_node->full_name);
+		dev_err(dev, "Not supported number of fman-ports handles of mac node %pOF from device tree\n",
+			mac_node);
 		err = -EINVAL;
 		goto _return_dev_set_drvdata;
 	}
@@ -845,24 +819,24 @@ static int mac_probe(struct platform_device *_of_dev)
 		/* Find the port node */
 		dev_node = of_parse_phandle(mac_node, "fsl,fman-ports", i);
 		if (!dev_node) {
-			dev_err(dev, "of_parse_phandle(%s, fsl,fman-ports) failed\n",
-				mac_node->full_name);
+			dev_err(dev, "of_parse_phandle(%pOF, fsl,fman-ports) failed\n",
+				mac_node);
 			err = -EINVAL;
 			goto _return_of_node_put;
 		}
 
 		of_dev = of_find_device_by_node(dev_node);
 		if (!of_dev) {
-			dev_err(dev, "of_find_device_by_node(%s) failed\n",
-				dev_node->full_name);
+			dev_err(dev, "of_find_device_by_node(%pOF) failed\n",
+				dev_node);
 			err = -EINVAL;
 			goto _return_of_node_put;
 		}
 
 		mac_dev->port[i] = fman_port_bind(&of_dev->dev);
 		if (!mac_dev->port[i]) {
-			dev_err(dev, "dev_get_drvdata(%s) failed\n",
-				dev_node->full_name);
+			dev_err(dev, "dev_get_drvdata(%pOF) failed\n",
+				dev_node);
 			err = -EINVAL;
 			goto _return_of_node_put;
 		}
@@ -870,16 +844,14 @@ static int mac_probe(struct platform_device *_of_dev)
 	}
 
 	/* Get the PHY connection type */
-	char_prop = (const char *)of_get_property(mac_node,
-						  "phy-connection-type", NULL);
-	if (!char_prop) {
+	phy_if = of_get_phy_mode(mac_node);
+	if (phy_if < 0) {
 		dev_warn(dev,
-			 "of_get_property(%s, phy-connection-type) failed. Defaulting to MII\n",
-			 mac_node->full_name);
-		priv->phy_if = PHY_INTERFACE_MODE_MII;
-	} else {
-		priv->phy_if = str2phy(char_prop);
+			 "of_get_phy_mode() for %pOF failed. Defaulting to SGMII\n",
+			 mac_node);
+		phy_if = PHY_INTERFACE_MODE_SGMII;
 	}
+	priv->phy_if = phy_if;
 
 	priv->speed		= phy2speed[priv->phy_if];
 	priv->max_speed		= priv->speed;
@@ -908,19 +880,25 @@ static int mac_probe(struct platform_device *_of_dev)
 
 		priv->fixed_link = kzalloc(sizeof(*priv->fixed_link),
 					   GFP_KERNEL);
-		if (!priv->fixed_link)
+		if (!priv->fixed_link) {
+			err = -ENOMEM;
 			goto _return_dev_set_drvdata;
+		}
 
 		priv->phy_node = of_node_get(mac_node);
 		phy = of_phy_find_device(priv->phy_node);
-		if (!phy)
+		if (!phy) {
+			err = -EINVAL;
 			goto _return_dev_set_drvdata;
+		}
 
 		priv->fixed_link->link = phy->link;
 		priv->fixed_link->speed = phy->speed;
 		priv->fixed_link->duplex = phy->duplex;
 		priv->fixed_link->pause = phy->pause;
 		priv->fixed_link->asym_pause = phy->asym_pause;
+
+		put_device(&phy->mdio.dev);
 	}
 
 	err = mac_dev->init(mac_dev);

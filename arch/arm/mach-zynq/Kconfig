@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-2.0
 config ARCH_ZYNQ
 	bool "Xilinx Zynq ARM Cortex A9 Platform"
 	depends on ARCH_MULTI_V7
@@ -28,6 +29,14 @@ config XILINX_PREFETCH
 	  This option turns on L1 & L2 cache prefetching to get the best performance
 	  in many cases. This may not always be the best performance depending on
 	  the usage.
+
+config XILINX_RESET_CODE
+	bool "Extra Reset Code DBFS entry"
+	default n
+	depends on DEBUG_FS
+	help
+	  This option adds an extra DBFS entry debug/zynq_rst/code. Values written
+	  are passed via REG slcr.REBOOT_STATUS Bits 15:0
 
 endmenu
 

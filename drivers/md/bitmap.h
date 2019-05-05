@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * bitmap.h: Copyright (C) Peter T. Breuer (ptb@ot.uc3m.es) 2003
  *
@@ -258,14 +259,20 @@ int bitmap_start_sync(struct bitmap *bitmap, sector_t offset, sector_t *blocks, 
 void bitmap_end_sync(struct bitmap *bitmap, sector_t offset, sector_t *blocks, int aborted);
 void bitmap_close_sync(struct bitmap *bitmap);
 void bitmap_cond_end_sync(struct bitmap *bitmap, sector_t sector, bool force);
+void bitmap_sync_with_cluster(struct mddev *mddev,
+			      sector_t old_lo, sector_t old_hi,
+			      sector_t new_lo, sector_t new_hi);
 
 void bitmap_unplug(struct bitmap *bitmap);
 void bitmap_daemon_work(struct mddev *mddev);
 
 int bitmap_resize(struct bitmap *bitmap, sector_t blocks,
 		  int chunksize, int init);
+struct bitmap *get_bitmap_from_slot(struct mddev *mddev, int slot);
 int bitmap_copy_from_slot(struct mddev *mddev, int slot,
 				sector_t *lo, sector_t *hi, bool clear_bits);
+void bitmap_free(struct bitmap *bitmap);
+void bitmap_wait_behind_writes(struct mddev *mddev);
 #endif
 
 #endif

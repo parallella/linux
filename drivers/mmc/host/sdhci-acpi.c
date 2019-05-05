@@ -43,7 +43,9 @@
 
 #ifdef CONFIG_X86
 #include <asm/cpu_device_id.h>
+#include <asm/intel-family.h>
 #include <asm/iosf_mbi.h>
+#include <linux/pci.h>
 #endif
 
 #include "sdhci.h"
@@ -126,11 +128,21 @@ static const struct sdhci_acpi_chip sdhci_acpi_chip_int = {
 static bool sdhci_acpi_byt(void)
 {
 	static const struct x86_cpu_id byt[] = {
-		{ X86_VENDOR_INTEL, 6, 0x37 },
+		{ X86_VENDOR_INTEL, 6, INTEL_FAM6_ATOM_SILVERMONT1 },
 		{}
 	};
 
 	return x86_match_cpu(byt);
+}
+
+static bool sdhci_acpi_cht(void)
+{
+	static const struct x86_cpu_id cht[] = {
+		{ X86_VENDOR_INTEL, 6, INTEL_FAM6_ATOM_AIRMONT },
+		{}
+	};
+
+	return x86_match_cpu(cht);
 }
 
 #define BYT_IOSF_SCCEP			0x63
@@ -177,6 +189,45 @@ static bool sdhci_acpi_byt_defer(struct device *dev)
 	return false;
 }
 
+static bool sdhci_acpi_cht_pci_wifi(unsigned int vendor, unsigned int device,
+				    unsigned int slot, unsigned int parent_slot)
+{
+	struct pci_dev *dev, *parent, *from = NULL;
+
+	while (1) {
+		dev = pci_get_device(vendor, device, from);
+		pci_dev_put(from);
+		if (!dev)
+			break;
+		parent = pci_upstream_bridge(dev);
+		if (ACPI_COMPANION(&dev->dev) && PCI_SLOT(dev->devfn) == slot &&
+		    parent && PCI_SLOT(parent->devfn) == parent_slot &&
+		    !pci_upstream_bridge(parent)) {
+			pci_dev_put(dev);
+			return true;
+		}
+		from = dev;
+	}
+
+	return false;
+}
+
+/*
+ * GPDwin uses PCI wifi which conflicts with SDIO's use of
+ * acpi_device_fix_up_power() on child device nodes. Identifying GPDwin is
+ * problematic, but since SDIO is only used for wifi, the presence of the PCI
+ * wifi card in the expected slot with an ACPI companion node, is used to
+ * indicate that acpi_device_fix_up_power() should be avoided.
+ */
+static inline bool sdhci_acpi_no_fixup_child_power(const char *hid,
+						   const char *uid)
+{
+	return sdhci_acpi_cht() &&
+	       !strcmp(hid, "80860F14") &&
+	       !strcmp(uid, "2") &&
+	       sdhci_acpi_cht_pci_wifi(0x14e4, 0x43ec, 0, 28);
+}
+
 #else
 
 static inline void sdhci_acpi_byt_setting(struct device *dev)
@@ -184,6 +235,12 @@ static inline void sdhci_acpi_byt_setting(struct device *dev)
 }
 
 static inline bool sdhci_acpi_byt_defer(struct device *dev)
+{
+	return false;
+}
+
+static inline bool sdhci_acpi_no_fixup_child_power(const char *hid,
+						   const char *uid)
 {
 	return false;
 }
@@ -200,8 +257,6 @@ static int bxt_get_cd(struct mmc_host *mmc)
 	if (!gpio_cd)
 		return 0;
 
-	pm_runtime_get_sync(mmc->parent);
-
 	spin_lock_irqsave(&host->lock, flags);
 
 	if (host->flags & SDHCI_DEVICE_DEAD)
@@ -210,9 +265,6 @@ static int bxt_get_cd(struct mmc_host *mmc)
 	ret = !!(sdhci_readl(host, SDHCI_PRESENT_STATE) & SDHCI_CARD_PRESENT);
 out:
 	spin_unlock_irqrestore(&host->lock, flags);
-
-	pm_runtime_mark_last_busy(mmc->parent);
-	pm_runtime_put_autosuspend(mmc->parent);
 
 	return ret;
 }
@@ -242,12 +294,9 @@ static int sdhci_acpi_sdio_probe_slot(struct platform_device *pdev,
 				      const char *hid, const char *uid)
 {
 	struct sdhci_acpi_host *c = platform_get_drvdata(pdev);
-	struct sdhci_host *host;
 
 	if (!c || !c->host)
 		return 0;
-
-	host = c->host;
 
 	/* Platform specific code during sdio probe slot goes here */
 
@@ -277,8 +326,7 @@ static const struct sdhci_acpi_slot sdhci_acpi_slot_int_emmc = {
 	.chip    = &sdhci_acpi_chip_int,
 	.caps    = MMC_CAP_8_BIT_DATA | MMC_CAP_NONREMOVABLE |
 		   MMC_CAP_HW_RESET | MMC_CAP_1_8V_DDR |
-		   MMC_CAP_BUS_WIDTH_TEST | MMC_CAP_WAIT_WHILE_BUSY,
-	.caps2   = MMC_CAP2_HC_ERASE_SZ,
+		   MMC_CAP_CMD_DURING_TFR | MMC_CAP_WAIT_WHILE_BUSY,
 	.flags   = SDHCI_ACPI_RUNTIME_PM,
 	.quirks  = SDHCI_QUIRK_NO_ENDATTR_IN_NOPDESC,
 	.quirks2 = SDHCI_QUIRK2_PRESET_VALUE_BROKEN |
@@ -292,7 +340,7 @@ static const struct sdhci_acpi_slot sdhci_acpi_slot_int_sdio = {
 		   SDHCI_QUIRK_NO_ENDATTR_IN_NOPDESC,
 	.quirks2 = SDHCI_QUIRK2_HOST_OFF_CARD_ON,
 	.caps    = MMC_CAP_NONREMOVABLE | MMC_CAP_POWER_OFF_CARD |
-		   MMC_CAP_BUS_WIDTH_TEST | MMC_CAP_WAIT_WHILE_BUSY,
+		   MMC_CAP_WAIT_WHILE_BUSY,
 	.flags   = SDHCI_ACPI_RUNTIME_PM,
 	.pm_caps = MMC_PM_KEEP_POWER,
 	.probe_slot	= sdhci_acpi_sdio_probe_slot,
@@ -304,7 +352,7 @@ static const struct sdhci_acpi_slot sdhci_acpi_slot_int_sd = {
 	.quirks  = SDHCI_QUIRK_NO_ENDATTR_IN_NOPDESC,
 	.quirks2 = SDHCI_QUIRK2_CARD_ON_NEEDS_BUS_ON |
 		   SDHCI_QUIRK2_STOP_WITH_TC,
-	.caps    = MMC_CAP_BUS_WIDTH_TEST | MMC_CAP_WAIT_WHILE_BUSY,
+	.caps    = MMC_CAP_WAIT_WHILE_BUSY | MMC_CAP_AGGRESSIVE_PM,
 	.probe_slot	= sdhci_acpi_sd_probe_slot,
 };
 
@@ -330,6 +378,7 @@ static const struct sdhci_acpi_uid_slot sdhci_acpi_uids[] = {
 	{ "80865ACC", NULL, &sdhci_acpi_slot_int_emmc },
 	{ "80865AD0", NULL, &sdhci_acpi_slot_int_sdio },
 	{ "80860F14" , "1" , &sdhci_acpi_slot_int_emmc },
+	{ "80860F14" , "2" , &sdhci_acpi_slot_int_sdio },
 	{ "80860F14" , "3" , &sdhci_acpi_slot_int_sd   },
 	{ "80860F16" , NULL, &sdhci_acpi_slot_int_sd   },
 	{ "INT33BB"  , "2" , &sdhci_acpi_slot_int_sdio },
@@ -380,8 +429,7 @@ static const struct sdhci_acpi_slot *sdhci_acpi_get_slot(const char *hid,
 static int sdhci_acpi_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
-	acpi_handle handle = ACPI_HANDLE(dev);
-	struct acpi_device *device;
+	struct acpi_device *device, *child;
 	struct sdhci_acpi_host *c;
 	struct sdhci_host *host;
 	struct resource *iomem;
@@ -390,17 +438,23 @@ static int sdhci_acpi_probe(struct platform_device *pdev)
 	const char *uid;
 	int err;
 
-	if (acpi_bus_get_device(handle, &device))
+	device = ACPI_COMPANION(dev);
+	if (!device)
 		return -ENODEV;
-
-	if (acpi_bus_get_status(device) || !device->status.present)
-		return -ENODEV;
-
-	if (sdhci_acpi_byt_defer(dev))
-		return -EPROBE_DEFER;
 
 	hid = acpi_device_hid(device);
 	uid = device->pnp.unique_id;
+
+	/* Power on the SDHCI controller and its children */
+	acpi_device_fix_up_power(device);
+	if (!sdhci_acpi_no_fixup_child_power(hid, uid)) {
+		list_for_each_entry(child, &device->children, node)
+			if (child->status.present && child->status.enabled)
+				acpi_device_fix_up_power(child);
+	}
+
+	if (sdhci_acpi_byt_defer(dev))
+		return -EPROBE_DEFER;
 
 	iomem = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 	if (!iomem)
@@ -462,7 +516,10 @@ static int sdhci_acpi_probe(struct platform_device *pdev)
 	if (sdhci_acpi_flag(c, SDHCI_ACPI_SD_CD)) {
 		bool v = sdhci_acpi_flag(c, SDHCI_ACPI_SD_CD_OVERRIDE_LEVEL);
 
-		if (mmc_gpiod_request_cd(host->mmc, NULL, 0, v, 0, NULL)) {
+		err = mmc_gpiod_request_cd(host->mmc, NULL, 0, v, 0, NULL);
+		if (err) {
+			if (err == -EPROBE_DEFER)
+				goto err_free;
 			dev_warn(dev, "failed to setup card detect gpio\n");
 			c->use_runtime_pm = false;
 		}
@@ -516,8 +573,12 @@ static int sdhci_acpi_remove(struct platform_device *pdev)
 static int sdhci_acpi_suspend(struct device *dev)
 {
 	struct sdhci_acpi_host *c = dev_get_drvdata(dev);
+	struct sdhci_host *host = c->host;
 
-	return sdhci_suspend_host(c->host);
+	if (host->tuning_mode != SDHCI_TUNING_MODE_3)
+		mmc_retune_needed(host->mmc);
+
+	return sdhci_suspend_host(host);
 }
 
 static int sdhci_acpi_resume(struct device *dev)
@@ -529,11 +590,6 @@ static int sdhci_acpi_resume(struct device *dev)
 	return sdhci_resume_host(c->host);
 }
 
-#else
-
-#define sdhci_acpi_suspend	NULL
-#define sdhci_acpi_resume	NULL
-
 #endif
 
 #ifdef CONFIG_PM
@@ -541,8 +597,12 @@ static int sdhci_acpi_resume(struct device *dev)
 static int sdhci_acpi_runtime_suspend(struct device *dev)
 {
 	struct sdhci_acpi_host *c = dev_get_drvdata(dev);
+	struct sdhci_host *host = c->host;
 
-	return sdhci_runtime_suspend_host(c->host);
+	if (host->tuning_mode != SDHCI_TUNING_MODE_3)
+		mmc_retune_needed(host->mmc);
+
+	return sdhci_runtime_suspend_host(host);
 }
 
 static int sdhci_acpi_runtime_resume(struct device *dev)
@@ -557,8 +617,7 @@ static int sdhci_acpi_runtime_resume(struct device *dev)
 #endif
 
 static const struct dev_pm_ops sdhci_acpi_pm_ops = {
-	.suspend		= sdhci_acpi_suspend,
-	.resume			= sdhci_acpi_resume,
+	SET_SYSTEM_SLEEP_PM_OPS(sdhci_acpi_suspend, sdhci_acpi_resume)
 	SET_RUNTIME_PM_OPS(sdhci_acpi_runtime_suspend,
 			sdhci_acpi_runtime_resume, NULL)
 };

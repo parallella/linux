@@ -16,6 +16,7 @@
  * later version.
  */
 
+#include <linux/clk.h>
 #include <linux/delay.h>
 #include <linux/device.h>
 #include <linux/dma-mapping.h>
@@ -176,6 +177,7 @@ struct xusb_ep {
  * @addr: the usb device base address
  * @lock: instance of spinlock
  * @dma_enabled: flag indicating whether the dma is included in the system
+ * @clk: pointer to struct clk
  * @read_fn: function pointer to read device registers
  * @write_fn: function pointer to write to device registers
  */
@@ -193,8 +195,9 @@ struct xusb_udc {
 	void __iomem *addr;
 	spinlock_t lock;
 	bool dma_enabled;
+	struct clk *clk;
 
-	unsigned int (*read_fn)(void __iomem *);
+	unsigned int (*read_fn)(void __iomem *reg);
 	void (*write_fn)(void __iomem *, u32, u32);
 };
 
@@ -968,15 +971,11 @@ static struct usb_request *xudc_ep_alloc_request(struct usb_ep *_ep,
 						 gfp_t gfp_flags)
 {
 	struct xusb_ep *ep = to_xusb_ep(_ep);
-	struct xusb_udc *udc;
 	struct xusb_req *req;
 
-	udc = ep->udc;
 	req = kzalloc(sizeof(*req), gfp_flags);
-	if (!req) {
-		dev_err(udc->dev, "%s:not enough memory", __func__);
+	if (!req)
 		return NULL;
-	}
 
 	req->ep = ep;
 	INIT_LIST_HEAD(&req->queue);
@@ -1153,7 +1152,7 @@ static int xudc_ep_dequeue(struct usb_ep *_ep, struct usb_request *_req)
 			break;
 	}
 	if (&req->usb_req != _req) {
-		spin_unlock_irqrestore(&ep->udc->lock, flags);
+		spin_unlock_irqrestore(&udc->lock, flags);
 		return -EINVAL;
 	}
 	xudc_done(ep, req, -ECONNRESET);
@@ -1408,7 +1407,6 @@ err:
 /**
  * xudc_stop - stops the device.
  * @gadget: pointer to the usb gadget structure
- * @driver: pointer to usb gadget driver structure
  *
  * Return: zero always
  */
@@ -1741,7 +1739,7 @@ static void xudc_set_clear_feature(struct xusb_udc *udc)
  *
  * Process setup packet and delegate to gadget layer.
  */
-static void xudc_handle_setup(struct xusb_udc *udc)
+static void xudc_handle_setup(struct xusb_udc *udc) __must_hold(&udc->lock)
 {
 	struct xusb_ep *ep0 = &udc->ep[0];
 	struct usb_ctrlrequest setup;
@@ -2055,7 +2053,6 @@ static int xudc_probe(struct platform_device *pdev)
 	struct device_node *np = pdev->dev.of_node;
 	struct resource *res;
 	struct xusb_udc *udc;
-	struct xusb_ep *ep0;
 	int irq;
 	int ret;
 	u32 ier;
@@ -2104,6 +2101,26 @@ static int xudc_probe(struct platform_device *pdev)
 	udc->gadget.ep0 = &udc->ep[XUSB_EP_NUMBER_ZERO].ep_usb;
 	udc->gadget.name = driver_name;
 
+	udc->clk = devm_clk_get(&pdev->dev, "s_axi_aclk");
+	if (IS_ERR(udc->clk)) {
+		if (PTR_ERR(udc->clk) != -ENOENT) {
+			ret = PTR_ERR(udc->clk);
+			goto fail;
+		}
+
+		/*
+		 * Clock framework support is optional, continue on,
+		 * anyways if we don't find a matching clock
+		 */
+		udc->clk = NULL;
+	}
+
+	ret = clk_prepare_enable(udc->clk);
+	if (ret) {
+		dev_err(&pdev->dev, "Unable to enable clock.\n");
+		return ret;
+	}
+
 	spin_lock_init(&udc->lock);
 
 	/* Check for IP endianness */
@@ -2118,8 +2135,6 @@ static int xudc_probe(struct platform_device *pdev)
 	udc->write_fn(udc->addr, XUSB_TESTMODE_OFFSET, 0);
 
 	xudc_eps_init(udc);
-
-	ep0 = &udc->ep[0];
 
 	/* Set device address to 0.*/
 	udc->write_fn(udc->addr, XUSB_ADDRESS_OFFSET, 0);
@@ -2161,6 +2176,7 @@ static int xudc_remove(struct platform_device *pdev)
 	struct xusb_udc *udc = platform_get_drvdata(pdev);
 
 	usb_del_gadget_udc(&udc->gadget);
+	clk_disable_unprepare(udc->clk);
 
 	return 0;
 }

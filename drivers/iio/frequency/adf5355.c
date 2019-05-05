@@ -1,7 +1,7 @@
 /*
  * ADF5355 SPI Wideband Synthesizer driver
  *
- * Copyright 2015 Analog Devices Inc.
+ * Copyright 2015-2018 Analog Devices Inc.
  *
  * Licensed under the GPL-2.
  */
@@ -26,6 +26,8 @@
 #include <linux/iio/iio.h>
 #include <linux/iio/sysfs.h>
 #include <linux/iio/frequency/adf5355.h>
+
+#include <linux/clk/clkscale.h>
 
 /* REG0 Bit Definitions */
 #define ADF5355_REG0_INT(x)			(((x) & 0xFFFF) << 4)
@@ -70,7 +72,7 @@
 #define ADF5355_REG5_DEFAULT			0x00800025
 
 /* REG6 Bit Definitions */
-#define ADF4355_REG6_OUTPUTB_PWR(x)		(((x) & 0x7) << 4)
+#define ADF4355_REG6_OUTPUTB_PWR(x)		(((x) & 0x3) << 7)
 #define ADF4355_REG6_RF_OUTB_EN(x)		((x) << 9)
 #define ADF5355_REG6_OUTPUT_PWR(x)		(((x) & 0x3) << 4)
 #define ADF5355_REG6_RF_OUT_EN(x)		((x) << 6)
@@ -118,12 +120,29 @@
 /* Specifications */
 #define ADF5355_MIN_VCO_FREQ		3400000000ULL /* Hz */
 #define ADF5355_MAX_VCO_FREQ		6800000000ULL /* Hz */
-
-#define ADF4355_MAX_OUT_FREQ		4400000000ULL /* Hz */
 #define ADF5355_MAX_OUT_FREQ		ADF5355_MAX_VCO_FREQ /* Hz */
 #define ADF5355_MIN_OUT_FREQ		(ADF5355_MIN_VCO_FREQ / 64) /* Hz */
 #define ADF5355_MAX_OUTB_FREQ		(ADF5355_MAX_VCO_FREQ * 2) /* Hz */
 #define ADF5355_MIN_OUTB_FREQ		(ADF5355_MIN_VCO_FREQ * 2) /* Hz */
+
+
+#define ADF4355_MIN_VCO_FREQ		3400000000ULL /* Hz */
+#define ADF4355_MAX_VCO_FREQ		6800000000ULL /* Hz */
+#define ADF4355_MAX_OUT_FREQ		ADF4355_MAX_VCO_FREQ /* Hz */
+#define ADF4355_MIN_OUT_FREQ		(ADF4355_MIN_VCO_FREQ / 64) /* Hz */
+
+
+#define ADF4355_3_MIN_VCO_FREQ		3300000000ULL /* Hz */
+#define ADF4355_3_MAX_VCO_FREQ		6600000000ULL /* Hz */
+#define ADF4355_3_MAX_OUT_FREQ		ADF4355_3_MAX_VCO_FREQ /* Hz */
+#define ADF4355_3_MIN_OUT_FREQ		(ADF4355_3_MIN_VCO_FREQ / 64) /* Hz */
+
+
+#define ADF4355_2_MIN_VCO_FREQ		3400000000ULL /* Hz */
+#define ADF4355_2_MAX_VCO_FREQ		6800000000ULL /* Hz */
+#define ADF4355_2_MAX_OUT_FREQ		4400000000ULL /* Hz */
+#define ADF4355_2_MIN_OUT_FREQ		(ADF4355_2_MIN_VCO_FREQ / 64) /* Hz */
+
 
 #define ADF5355_MAX_FREQ_PFD		125000000UL /* Hz */
 #define ADF5355_MAX_FREQ_REFIN		600000000UL /* Hz */
@@ -157,6 +176,13 @@ enum {
 	ADF5355_PWRDOWN,
 };
 
+enum {
+	ADF5355,
+	ADF4355,
+	ADF4355_2,
+	ADF4355_3,
+};
+
 struct adf5355_state {
 	struct spi_device	*spi;
 	struct regulator		*reg;
@@ -165,6 +191,7 @@ struct adf5355_state {
 	unsigned long long	freq_req;
 	unsigned long		clkin;
 	unsigned long		fpfd; /* Phase Frequency Detector */
+	unsigned long long	min_vco_freq;
 	unsigned long long	min_out_freq;
 	unsigned long long	max_out_freq;
 	u32			freq_req_chan;
@@ -189,6 +216,7 @@ struct child_clk {
 	struct clk_hw		hw;
 	struct adf5355_state	*st;
 	bool			enabled;
+	struct clock_scale 	scale;
 };
 
 #define to_clk_priv(_hw) container_of(_hw, struct child_clk, hw)
@@ -388,7 +416,7 @@ static int adf5355_setup(struct adf5355_state *st, unsigned long parent_rate)
 
 	st->regs[ADF5355_REG11] = ADF5355_REG11_DEFAULT;
 
-	st->regs[ADF5355_REG12] = ADF5355_REG12_PHASE_RESYNC_CLK_DIV(0) |
+	st->regs[ADF5355_REG12] = ADF5355_REG12_PHASE_RESYNC_CLK_DIV(1) |
 		ADF5355_REG12_DEFAULT;
 
 	st->all_synced = false;
@@ -404,12 +432,12 @@ static int adf5355_set_freq(struct adf5355_state *st, unsigned long long freq,
 	u32 cp_bleed;
 
 	if (channel == 0) {
-		if ((freq > st->max_out_freq) || (freq < ADF5355_MIN_OUT_FREQ))
+		if ((freq > st->max_out_freq) || (freq < st->min_out_freq))
 			return -EINVAL;
 
 		st->rf_div_sel = 0;
 
-		while (freq < ADF5355_MIN_VCO_FREQ) {
+		while (freq < st->min_vco_freq) {
 			freq <<= 1;
 			st->rf_div_sel++;
 		}
@@ -443,8 +471,8 @@ static int adf5355_set_freq(struct adf5355_state *st, unsigned long long freq,
 	st->regs[ADF5355_REG6] =
 		ADF5355_REG6_OUTPUT_PWR(pdata->outa_power) |
 		ADF5355_REG6_RF_OUT_EN(pdata->outa_en) |
-		(st->is_5355 ? ADF5355_REG6_RF_OUTB_EN(pdata->outb_en) :
-			ADF4355_REG6_OUTPUTB_PWR(pdata->outa_power) |
+		(st->is_5355 ? ADF5355_REG6_RF_OUTB_EN(!pdata->outb_en) :
+			ADF4355_REG6_OUTPUTB_PWR(pdata->outb_power) |
 			ADF4355_REG6_RF_OUTB_EN(pdata->outb_en)) |
 		ADF5355_REG6_MUTE_TILL_LOCK_EN(pdata->mute_till_lock_detect_en) |
 		ADF5355_REG6_CP_BLEED_CURR(cp_bleed) |
@@ -473,7 +501,7 @@ static ssize_t adf5355_write(struct iio_dev *indio_dev,
 {
 	struct adf5355_state *st = iio_priv(indio_dev);
 	unsigned long long readin;
-	unsigned long tmp;
+	unsigned long tmp = 0;
 	int ret;
 
 	ret = kstrtoull(buf, 10, &readin);
@@ -514,7 +542,7 @@ static ssize_t adf5355_write(struct iio_dev *indio_dev,
 				ADF5355_REG6_RF_OUTB_EN(1) :
 				ADF4355_REG6_RF_OUTB_EN(1));
 			st->regs[ADF5355_REG6] |= (st->is_5355 ?
-				ADF5355_REG6_RF_OUTB_EN(!!!readin) :
+				ADF5355_REG6_RF_OUTB_EN(!!readin) :
 				ADF4355_REG6_RF_OUTB_EN(!!!readin));
 		}
 		adf5355_sync_config(st, false);
@@ -560,9 +588,12 @@ static ssize_t adf5355_read(struct iio_dev *indio_dev,
 		if (chan->channel == 0) {
 			val = !(st->regs[ADF5355_REG6] & ADF5355_REG6_RF_OUT_EN(1));
 		} else {
-			val = ! (st->regs[ADF5355_REG6] & (st->is_5355 ?
-				ADF5355_REG6_RF_OUTB_EN(1) :
-				ADF4355_REG6_RF_OUTB_EN(1)));
+			if (st->is_5355)
+				val = st->regs[ADF5355_REG6] &
+					ADF5355_REG6_RF_OUTB_EN(1);
+			else
+				val = !(st->regs[ADF5355_REG6] &
+					ADF4355_REG6_RF_OUTB_EN(1));
 		}
 		break;
 	default:
@@ -650,10 +681,8 @@ static struct adf5355_platform_data *adf5355_parse_dt(struct device *dev)
 	int ret;
 
 	pdata = devm_kzalloc(dev, sizeof(*pdata), GFP_KERNEL);
-	if (!pdata) {
-		dev_err(dev, "could not allocate memory for platform data\n");
+	if (!pdata)
 		return NULL;
-	}
 
 	strncpy(&pdata->name[0], np->name, SPI_NAME_SIZE - 1);
 
@@ -728,7 +757,7 @@ static unsigned long adf5355_clk_recalc_rate(struct clk_hw *hw,
 
 	rate = adf5355_pll_fract_n_get_rate(to_clk_priv(hw)->st, 0);
 
-	return rate >> to_clk_priv(hw)->st->pdata->clock_shift;
+	return to_ccf_scaled(rate, &to_clk_priv(hw)->scale);
 }
 
 static long adf5355_clk_round_rate(struct clk_hw *hw, unsigned long rate,
@@ -745,8 +774,7 @@ static int adf5355_clk_set_rate(struct clk_hw *hw, unsigned long rate,
 	if (parent_rate != st->clkin)
 		adf5355_setup(st, parent_rate);
 
-	return adf5355_set_freq(st, (unsigned long long)rate <<
-		to_clk_priv(hw)->st->pdata->clock_shift, 0);
+	return adf5355_set_freq(st, from_ccf_scaled(rate, &to_clk_priv(hw)->scale), 0);
 }
 
 static int adf5355_clk_enable(struct clk_hw *hw)
@@ -823,7 +851,33 @@ static int adf5355_probe(struct spi_device *spi)
 	st->pdata = pdata;
 	st->clk = clk;
 
-	st->is_5355 = (spi_get_device_id(spi)->driver_data == 5355);
+	switch (spi_get_device_id(spi)->driver_data) {
+	case ADF5355:
+		st->is_5355 = true;
+		st->max_out_freq = ADF5355_MAX_OUT_FREQ;
+		st->min_out_freq = ADF5355_MIN_OUT_FREQ;
+		st->min_vco_freq = ADF5355_MIN_VCO_FREQ;
+		break;
+	case ADF4355:
+		st->is_5355 = false;
+		st->max_out_freq = ADF4355_MAX_OUT_FREQ;
+		st->min_out_freq = ADF4355_MIN_OUT_FREQ;
+		st->min_vco_freq = ADF4355_MIN_VCO_FREQ;
+		break;
+	case ADF4355_2:
+		st->is_5355 = false;
+		st->max_out_freq = ADF4355_2_MAX_OUT_FREQ;
+		st->min_out_freq = ADF4355_2_MIN_OUT_FREQ;
+		st->min_vco_freq = ADF4355_2_MIN_VCO_FREQ;
+		break;
+	case ADF4355_3:
+		st->is_5355 = false;
+		st->max_out_freq = ADF4355_3_MAX_OUT_FREQ;
+		st->min_out_freq = ADF4355_3_MIN_OUT_FREQ;
+		st->min_vco_freq = ADF4355_3_MIN_VCO_FREQ;
+		break;
+	}
+
 	st->max_out_freq = st->is_5355 ? ADF5355_MAX_OUT_FREQ : ADF4355_MAX_OUT_FREQ;
 
 	indio_dev->dev.parent = &spi->dev;
@@ -869,7 +923,6 @@ static int adf5355_probe(struct spi_device *spi)
 
 		clk_priv = devm_kzalloc(&spi->dev, sizeof(*clk_priv), GFP_KERNEL);
 		if (!clk_priv) {
-			dev_err(&spi->dev, "%s: could not allocate fixed factor clk\n", __func__);
 			ret = -ENOMEM;
 			goto error_disable_reg;
 		}
@@ -882,11 +935,18 @@ static int adf5355_probe(struct spi_device *spi)
 		of_property_read_string(spi->dev.of_node, "clock-output-names",
 			&clk_name);
 
+		ret = of_clk_get_scale(spi->dev.of_node, NULL, &clk_priv->scale);
+
+		if (ret < 0) {
+			clk_priv->scale.mult = 1;
+			clk_priv->scale.div = (1 << pdata->clock_shift);
+		}
+
 		init.name = clk_name;
 		init.ops = &clkout_ops;
 		init.flags = 0;
 
-		parent_name = of_clk_get_parent_name(spi->dev.of_node, 0);
+		parent_name = __clk_get_name(clk);
 		init.parent_names = &parent_name;
 		init.num_parents = 1;
 
@@ -934,10 +994,12 @@ static int adf5355_remove(struct spi_device *spi)
 	return 0;
 }
 
+
 static const struct spi_device_id adf5355_id[] = {
-	{"adf5355", 5355},
-	{"adf4355-2", 4355},
-	{"adf4355-3", 4355},
+	{"adf5355", ADF5355},
+	{"adf4355", ADF4355},
+	{"adf4355-2", ADF4355_2},
+	{"adf4355-3", ADF4355_3},
 	{}
 };
 

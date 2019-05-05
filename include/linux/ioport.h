@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * ioport.h	Definitions of routines for detecting, reserving and
  *		allocating system resources.
@@ -26,6 +27,9 @@ struct resource {
 
 /*
  * IO resources have these defined flags.
+ *
+ * PCI devices expose these flags to userspace in the "resource" sysfs file,
+ * so don't move them.
  */
 #define IORESOURCE_BITS		0x000000ff	/* Bus-specific bits */
 
@@ -110,6 +114,7 @@ struct resource {
 
 /* PCI control bits.  Shares IORESOURCE_BITS with above PCI ROM.  */
 #define IORESOURCE_PCI_FIXED		(1<<4)	/* Do not move resource */
+#define IORESOURCE_PCI_EA_BEI		(1<<5)	/* BAR Equivalent Indicator */
 
 /*
  * I/O Resource Descriptors
@@ -126,6 +131,8 @@ enum {
 	IORES_DESC_ACPI_NV_STORAGE		= 3,
 	IORES_DESC_PERSISTENT_MEMORY		= 4,
 	IORES_DESC_PERSISTENT_MEMORY_LEGACY	= 5,
+	IORES_DESC_DEVICE_PRIVATE_MEMORY	= 6,
+	IORES_DESC_DEVICE_PUBLIC_MEMORY		= 7,
 };
 
 /* helpers to define resources */

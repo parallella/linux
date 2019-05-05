@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef __NVKM_LTC_H__
 #define __NVKM_LTC_H__
 #include <core/subdev.h>
@@ -38,4 +39,5 @@ int gk104_ltc_new(struct nvkm_device *, int, struct nvkm_ltc **);
 int gk20a_ltc_new(struct nvkm_device *, int, struct nvkm_ltc **);
 int gm107_ltc_new(struct nvkm_device *, int, struct nvkm_ltc **);
 int gm200_ltc_new(struct nvkm_device *, int, struct nvkm_ltc **);
+int gp100_ltc_new(struct nvkm_device *, int, struct nvkm_ltc **);
 #endif

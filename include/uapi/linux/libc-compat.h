@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
 /*
  * Compatibility interface for userspace libc header coordination:
  *
@@ -48,13 +49,13 @@
 #ifndef _UAPI_LIBC_COMPAT_H
 #define _UAPI_LIBC_COMPAT_H
 
-/* We have included glibc headers... */
-#if defined(__GLIBC__)
+/* We have included libc headers... */
+#if !defined(__KERNEL__)
 
-/* Coordinate with glibc net/if.h header. */
-#if defined(_NET_IF_H)
+/* Coordinate with libc net/if.h header. */
+#if defined(_NET_IF_H) && (!defined(__GLIBC__) || defined(__USE_MISC))
 
-/* GLIBC headers included first so don't define anything
+/* LIBC headers included first so don't define anything
  * that would already be defined. */
 
 #define __UAPI_DEF_IF_IFCONF 0
@@ -65,7 +66,11 @@
 #define __UAPI_DEF_IF_NET_DEVICE_FLAGS 0
 /* For the future if glibc adds IFF_LOWER_UP, IFF_DORMANT and IFF_ECHO */
 #ifndef __UAPI_DEF_IF_NET_DEVICE_FLAGS_LOWER_UP_DORMANT_ECHO
+#ifdef __GLIBC__
 #define __UAPI_DEF_IF_NET_DEVICE_FLAGS_LOWER_UP_DORMANT_ECHO 1
+#else
+#define __UAPI_DEF_IF_NET_DEVICE_FLAGS_LOWER_UP_DORMANT_ECHO 0
+#endif
 #endif /* __UAPI_DEF_IF_NET_DEVICE_FLAGS_LOWER_UP_DORMANT_ECHO */
 
 #else /* _NET_IF_H */
@@ -85,10 +90,18 @@
 
 #endif /* _NET_IF_H */
 
-/* Coordinate with glibc netinet/in.h header. */
+/* musl defines the ethhdr struct itself in its netinet/if_ether.h.
+ * Glibc just includes the kernel header and uses a different guard. */
+#if defined(_NETINET_IF_ETHER_H)
+#define __UAPI_DEF_ETHHDR		0
+#else
+#define __UAPI_DEF_ETHHDR		1
+#endif
+
+/* Coordinate with libc netinet/in.h header. */
 #if defined(_NETINET_IN_H)
 
-/* GLIBC headers included first so don't define anything
+/* LIBC headers included first so don't define anything
  * that would already be defined. */
 #define __UAPI_DEF_IN_ADDR		0
 #define __UAPI_DEF_IN_IPPROTO		0
@@ -102,7 +115,7 @@
  * if the glibc code didn't define them. This guard matches
  * the guard in glibc/inet/netinet/in.h which defines the
  * additional in6_addr macros e.g. s6_addr16, and s6_addr32. */
-#if defined(__USE_MISC) || defined (__USE_GNU)
+#if !defined(__GLIBC__) || defined(__USE_MISC) || defined (__USE_GNU)
 #define __UAPI_DEF_IN6_ADDR_ALT		0
 #else
 #define __UAPI_DEF_IN6_ADDR_ALT		1
@@ -117,7 +130,7 @@
 #else
 
 /* Linux headers included first, and we must define everything
- * we need. The expectation is that glibc will check the
+ * we need. The expectation is that the libc will check the
  * __UAPI_DEF_* defines and adjust appropriately. */
 #define __UAPI_DEF_IN_ADDR		1
 #define __UAPI_DEF_IN_IPPROTO		1
@@ -127,7 +140,7 @@
 #define __UAPI_DEF_IN_CLASS		1
 
 #define __UAPI_DEF_IN6_ADDR		1
-/* We unconditionally define the in6_addr macros and glibc must
+/* We unconditionally define the in6_addr macros and the libc must
  * coordinate. */
 #define __UAPI_DEF_IN6_ADDR_ALT		1
 #define __UAPI_DEF_SOCKADDR_IN6		1
@@ -139,6 +152,25 @@
 
 #endif /* _NETINET_IN_H */
 
+/* Coordinate with glibc netipx/ipx.h header. */
+#if defined(__NETIPX_IPX_H)
+
+#define __UAPI_DEF_SOCKADDR_IPX			0
+#define __UAPI_DEF_IPX_ROUTE_DEFINITION		0
+#define __UAPI_DEF_IPX_INTERFACE_DEFINITION	0
+#define __UAPI_DEF_IPX_CONFIG_DATA		0
+#define __UAPI_DEF_IPX_ROUTE_DEF		0
+
+#else /* defined(__NETIPX_IPX_H) */
+
+#define __UAPI_DEF_SOCKADDR_IPX			1
+#define __UAPI_DEF_IPX_ROUTE_DEFINITION		1
+#define __UAPI_DEF_IPX_INTERFACE_DEFINITION	1
+#define __UAPI_DEF_IPX_CONFIG_DATA		1
+#define __UAPI_DEF_IPX_ROUTE_DEF		1
+
+#endif /* defined(__NETIPX_IPX_H) */
+
 /* Definitions for xattr.h */
 #if defined(_SYS_XATTR_H)
 #define __UAPI_DEF_XATTR		0
@@ -149,7 +181,7 @@
 /* If we did not see any headers from any supported C libraries,
  * or we are being included in the kernel, then define everything
  * that we need. */
-#else /* !defined(__GLIBC__) */
+#else /* defined(__KERNEL__) */
 
 /* Definitions for if.h */
 #define __UAPI_DEF_IF_IFCONF 1
@@ -160,6 +192,9 @@
 #define __UAPI_DEF_IF_NET_DEVICE_FLAGS 1
 /* For the future if glibc adds IFF_LOWER_UP, IFF_DORMANT and IFF_ECHO */
 #define __UAPI_DEF_IF_NET_DEVICE_FLAGS_LOWER_UP_DORMANT_ECHO 1
+
+/* Definitions for if_ether.h */
+#define __UAPI_DEF_ETHHDR 		1
 
 /* Definitions for in.h */
 #define __UAPI_DEF_IN_ADDR		1
@@ -179,9 +214,16 @@
 #define __UAPI_DEF_IN6_PKTINFO		1
 #define __UAPI_DEF_IP6_MTUINFO		1
 
+/* Definitions for ipx.h */
+#define __UAPI_DEF_SOCKADDR_IPX			1
+#define __UAPI_DEF_IPX_ROUTE_DEFINITION		1
+#define __UAPI_DEF_IPX_INTERFACE_DEFINITION	1
+#define __UAPI_DEF_IPX_CONFIG_DATA		1
+#define __UAPI_DEF_IPX_ROUTE_DEF		1
+
 /* Definitions for xattr.h */
 #define __UAPI_DEF_XATTR		1
 
-#endif /* __GLIBC__ */
+#endif /* __KERNEL__ */
 
 #endif /* _UAPI_LIBC_COMPAT_H */

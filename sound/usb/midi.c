@@ -242,8 +242,8 @@ static void dump_urb(const char *type, const u8 *data, int length)
 {
 	snd_printk(KERN_DEBUG "%s packet: [", type);
 	for (; length > 0; ++data, --length)
-		printk(" %02x", *data);
-	printk(" ]\n");
+		printk(KERN_CONT " %02x", *data);
+	printk(KERN_CONT " ]\n");
 }
 #else
 #define dump_urb(type, data, length) /* nothing */
@@ -911,6 +911,7 @@ static void snd_usbmidi_us122l_output(struct snd_usb_midi_out_endpoint *ep,
 	switch (snd_usb_get_speed(ep->umidi->dev)) {
 	case USB_SPEED_HIGH:
 	case USB_SPEED_SUPER:
+	case USB_SPEED_SUPER_PLUS:
 		count = 1;
 		break;
 	default:
@@ -1233,14 +1234,14 @@ static void snd_usbmidi_input_trigger(struct snd_rawmidi_substream *substream,
 		clear_bit(substream->number, &umidi->input_triggered);
 }
 
-static struct snd_rawmidi_ops snd_usbmidi_output_ops = {
+static const struct snd_rawmidi_ops snd_usbmidi_output_ops = {
 	.open = snd_usbmidi_output_open,
 	.close = snd_usbmidi_output_close,
 	.trigger = snd_usbmidi_output_trigger,
 	.drain = snd_usbmidi_output_drain,
 };
 
-static struct snd_rawmidi_ops snd_usbmidi_input_ops = {
+static const struct snd_rawmidi_ops snd_usbmidi_input_ops = {
 	.open = snd_usbmidi_input_open,
 	.close = snd_usbmidi_input_close,
 	.trigger = snd_usbmidi_input_trigger
@@ -1921,7 +1922,7 @@ static int roland_load_put(struct snd_kcontrol *kcontrol,
 	return changed;
 }
 
-static struct snd_kcontrol_new roland_load_ctl = {
+static const struct snd_kcontrol_new roland_load_ctl = {
 	.iface = SNDRV_CTL_ELEM_IFACE_MIXER,
 	.name = "MIDI Input Mode",
 	.info = roland_load_info,
@@ -2434,10 +2435,8 @@ int __snd_usbmidi_create(struct snd_card *card,
 		err = -ENXIO;
 		break;
 	}
-	if (err < 0) {
-		kfree(umidi);
-		return err;
-	}
+	if (err < 0)
+		goto free_midi;
 
 	/* create rawmidi device */
 	out_ports = 0;
@@ -2447,23 +2446,25 @@ int __snd_usbmidi_create(struct snd_card *card,
 		in_ports += hweight16(endpoints[i].in_cables);
 	}
 	err = snd_usbmidi_create_rawmidi(umidi, out_ports, in_ports);
-	if (err < 0) {
-		kfree(umidi);
-		return err;
-	}
+	if (err < 0)
+		goto free_midi;
 
 	/* create endpoint/port structures */
 	if (quirk && quirk->type == QUIRK_MIDI_MIDIMAN)
 		err = snd_usbmidi_create_endpoints_midiman(umidi, &endpoints[0]);
 	else
 		err = snd_usbmidi_create_endpoints(umidi, endpoints);
-	if (err < 0) {
-		return err;
-	}
+	if (err < 0)
+		goto exit;
 
 	usb_autopm_get_interface_no_resume(umidi->iface);
 
 	list_add_tail(&umidi->list, midi_list);
 	return 0;
+
+free_midi:
+	kfree(umidi);
+exit:
+	return err;
 }
 EXPORT_SYMBOL(__snd_usbmidi_create);

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Builtin evlist command: Show the list of event selectors present
  * in a perf.data file.
@@ -32,7 +33,7 @@ static int __cmd_evlist(const char *file_name, struct perf_attr_details *details
 	if (session == NULL)
 		return -1;
 
-	evlist__for_each(session->evlist, pos) {
+	evlist__for_each_entry(session->evlist, pos) {
 		perf_evsel__fprintf(pos, details, stdout);
 
 		if (pos->attr.type == PERF_TYPE_TRACEPOINT)
@@ -46,7 +47,7 @@ static int __cmd_evlist(const char *file_name, struct perf_attr_details *details
 	return 0;
 }
 
-int cmd_evlist(int argc, const char **argv, const char *prefix __maybe_unused)
+int cmd_evlist(int argc, const char **argv)
 {
 	struct perf_attr_details details = { .verbose = false, };
 	const struct option options[] = {

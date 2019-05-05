@@ -2,7 +2,7 @@
  *  Ralink MT7620A SoC PCI support
  *
  *  Copyright (C) 2007-2013 Bruce Chang (Mediatek)
- *  Copyright (C) 2013-2016 John Crispin <blogic@openwrt.org>
+ *  Copyright (C) 2013-2016 John Crispin <john@phrozen.org>
  *
  *  This program is free software; you can redistribute it and/or modify it
  *  under the terms of the GNU General Public License version 2 as published
@@ -15,7 +15,6 @@
 #include <linux/init.h>
 #include <linux/delay.h>
 #include <linux/interrupt.h>
-#include <linux/module.h>
 #include <linux/of.h>
 #include <linux/of_irq.h>
 #include <linux/of_pci.h>
@@ -292,7 +291,7 @@ static int mt7620_pci_probe(struct platform_device *pdev)
 							  IORESOURCE_MEM, 1);
 	u32 val = 0;
 
-	rstpcie0 = devm_reset_control_get(&pdev->dev, "pcie0");
+	rstpcie0 = devm_reset_control_get_exclusive(&pdev->dev, "pcie0");
 	if (IS_ERR(rstpcie0))
 		return PTR_ERR(rstpcie0);
 
@@ -362,7 +361,7 @@ static int mt7620_pci_probe(struct platform_device *pdev)
 	return 0;
 }
 
-int __init pcibios_map_irq(const struct pci_dev *dev, u8 slot, u8 pin)
+int pcibios_map_irq(const struct pci_dev *dev, u8 slot, u8 pin)
 {
 	u16 cmd;
 	u32 val;
@@ -407,13 +406,11 @@ static const struct of_device_id mt7620_pci_ids[] = {
 	{ .compatible = "mediatek,mt7620-pci" },
 	{},
 };
-MODULE_DEVICE_TABLE(of, mt7620_pci_ids);
 
 static struct platform_driver mt7620_pci_driver = {
 	.probe = mt7620_pci_probe,
 	.driver = {
 		.name = "mt7620-pci",
-		.owner = THIS_MODULE,
 		.of_match_table = of_match_ptr(mt7620_pci_ids),
 	},
 };

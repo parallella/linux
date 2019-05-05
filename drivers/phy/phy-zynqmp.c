@@ -29,25 +29,19 @@
 #include <linux/of_platform.h>
 #include <linux/of_address.h>
 #include <linux/phy/phy.h>
+#include <linux/phy/phy-zynqmp.h>
 #include <linux/platform_device.h>
 #include <linux/delay.h>
 #include <dt-bindings/phy/phy.h>
+#include <linux/soc/xilinx/zynqmp/fw.h>
+#include <linux/firmware/xilinx/zynqmp/firmware.h>
+#include <linux/reset.h>
 #include <linux/list.h>
+#include <linux/slab.h>
 
 #define MAX_LANES			4
 
-#define RST_LPD				0x023C
-#define RST_FPD				0x0100
-#define RST_ULPI			0x0250
-#define RST_ULPI_HI			0x202
-#define RST_ULPI_LOW			0x02
-
-#define RST_ULPI_TIMEOUT		10
-
-#define SATA_RESET			BIT(1)
-#define DP_RESET			BIT(16)
-#define USB0_RESET			(BIT(6) | BIT(8) | BIT(10))
-#define USB1_RESET			(BIT(7) | BIT(9) | BIT(11))
+#define RST_TIMEOUT			1000
 
 #define ICM_CFG0			0x10010
 #define ICM_CFG1			0x10014
@@ -147,11 +141,26 @@
 #define L0_TXPMD_TM_48			0x0CC0
 #define TXPMD_TM_48_OFFSET		0x4000
 
+#define TX_PROT_BUS_WIDTH		0x10040
+#define RX_PROT_BUS_WIDTH		0x10044
+
+#define PROT_BUS_WIDTH_SHIFT		2
+#define PROT_BUS_WIDTH_10		0x0
+#define PROT_BUS_WIDTH_20		0x1
+#define PROT_BUS_WIDTH_40		0x2
+
 #define LANE_CLK_SHARE_MASK		0x8F
 
 #define SATA_CONTROL_OFFSET		0x0100
 
 #define CONTROLLERS_PER_LANE		5
+
+#define PIPE_CLK_OFFSET			0x7c
+#define PIPE_CLK_ON			1
+#define PIPE_CLK_OFF			0
+#define PIPE_POWER_OFFSET		0x80
+#define PIPE_POWER_ON			1
+#define PIPE_POWER_OFF			0
 
 #define XPSGTR_TYPE_USB0	0 /* USB controller 0 */
 #define XPSGTR_TYPE_USB1	1 /* USB controller 1 */
@@ -208,6 +217,7 @@ enum pll_frequencies {
  * @protocol: protocol in which the lane operates
  * @ref_clk: enum of allowed ref clock rates for this lane PLL
  * @pll_lock: PLL status
+ * @skip_phy_init: skip phy_init() if true
  * @data: pointer to hold private data
  * @refclk_rate: PLL reference clock frequency
  * @share_laneclk: lane number of the clock to be shared
@@ -219,6 +229,7 @@ struct xpsgtr_phy {
 	u8 protocol;
 	enum pll_frequencies ref_clk;
 	bool pll_lock;
+	bool skip_phy_init;
 	void *data;
 	u32 refclk_rate;
 	u32 share_laneclk;
@@ -262,9 +273,21 @@ static struct xpsgtr_ssc ssc_lookup[] = {
  * @siou: siou base address
  * @gtr_mutex: mutex for locking
  * @phys: pointer to all the lanes
- * @fpd: base address for full power domain devices reset control
- * @lpd: base address for low power domain devices reset control
  * @tx_term_fix: fix for GT issue
+ * @saved_icm_cfg0: stored value of ICM CFG0 register
+ * @saved_icm_cfg1: stored value of ICM CFG1 register
+ * @sata_rst: a reset control for SATA
+ * @dp_rst: a reset control for DP
+ * @usb0_crst: a reset control for usb0 core
+ * @usb1_crst: a reset control for usb1 core
+ * @usb0_hibrst: a reset control for usb0 hibernation module
+ * @usb1_hibrst: a reset control for usb1 hibernation module
+ * @usb0_apbrst: a reset control for usb0 apb bus
+ * @usb1_apbrst: a reset control for usb1 apb bus
+ * @gem0_rst: a reset control for gem0
+ * @gem1_rst: a reset control for gem1
+ * @gem2_rst: a reset control for gem2
+ * @gem3_rst: a reset control for gem3
  */
 struct xpsgtr_dev {
 	struct device *dev;
@@ -272,9 +295,21 @@ struct xpsgtr_dev {
 	void __iomem *siou;
 	struct mutex gtr_mutex;
 	struct xpsgtr_phy **phys;
-	void __iomem *fpd;
-	void __iomem *lpd;
 	bool tx_term_fix;
+	unsigned int saved_icm_cfg0;
+	unsigned int saved_icm_cfg1;
+	struct reset_control *sata_rst;
+	struct reset_control *dp_rst;
+	struct reset_control *usb0_crst;
+	struct reset_control *usb1_crst;
+	struct reset_control *usb0_hibrst;
+	struct reset_control *usb1_hibrst;
+	struct reset_control *usb0_apbrst;
+	struct reset_control *usb1_apbrst;
+	struct reset_control *gem0_rst;
+	struct reset_control *gem1_rst;
+	struct reset_control *gem2_rst;
+	struct reset_control *gem3_rst;
 };
 
 int xpsgtr_override_deemph(struct phy *phy, u8 plvl, u8 vlvl)
@@ -461,7 +496,6 @@ static int xpsgtr_get_ssc(struct xpsgtr_phy *gtr_phy)
  */
 static int xpsgtr_configure_lane(struct xpsgtr_phy *gtr_phy)
 {
-
 	switch (gtr_phy->type) {
 	case XPSGTR_TYPE_USB0:
 	case XPSGTR_TYPE_USB1:
@@ -500,78 +534,240 @@ static int xpsgtr_configure_lane(struct xpsgtr_phy *gtr_phy)
 }
 
 /**
+ * xpsgtr_config_usbpipe - configures the PIPE3 signals for USB
+ * @gtr_phy: pointer to gtr phy device
+ */
+static void xpsgtr_config_usbpipe(struct xpsgtr_phy *gtr_phy)
+{
+	struct phy *phy = gtr_phy->phy;
+	struct xpsgtr_dev *gtr_dev = gtr_phy->data;
+	void __iomem *regs = dev_get_platdata(&phy->dev);
+
+	if (regs) {
+		/* Set PIPE power present signal */
+		writel(PIPE_POWER_ON, regs + PIPE_POWER_OFFSET);
+		/* Clear PIPE CLK signal */
+		writel(PIPE_CLK_OFF, regs + PIPE_CLK_OFFSET);
+	} else {
+		dev_info(gtr_dev->dev,
+			 "%s: No valid Platform_data found\n", __func__);
+	}
+}
+
+/**
+ * xpsgtr_reset_assert - asserts reset using reset framework
+ * @rstc: pointer to reset_control
+ *
+ * Return: 0 on success or error on failure
+ */
+static int xpsgtr_reset_assert(struct reset_control *rstc)
+{
+	unsigned long loop_time = msecs_to_jiffies(RST_TIMEOUT);
+	unsigned long timeout;
+
+	reset_control_assert(rstc);
+
+	/* wait until reset is asserted or timeout */
+	timeout = jiffies + loop_time;
+
+	while (!time_after_eq(jiffies, timeout)) {
+		if (reset_control_status(rstc) > 0)
+			return 0;
+
+		cpu_relax();
+	}
+
+	return -ETIMEDOUT;
+}
+
+/**
+ * xpsgtr_reset_release - de-asserts reset using reset framework
+ * @rstc: pointer to reset_control
+ *
+ * Return: 0 on success or error on failure
+ */
+static int xpsgtr_reset_release(struct reset_control *rstc)
+{
+	unsigned long loop_time = msecs_to_jiffies(RST_TIMEOUT);
+	unsigned long timeout;
+
+	reset_control_deassert(rstc);
+
+	/* wait until reset is de-asserted or timeout */
+	timeout = jiffies + loop_time;
+	while (!time_after_eq(jiffies, timeout)) {
+		if (!reset_control_status(rstc))
+			return 0;
+
+		cpu_relax();
+	}
+
+	return -ETIMEDOUT;
+}
+
+/**
  * xpsgtr_controller_reset - puts controller in reset
  * @gtr_phy: pointer to lane
+ *
+ * Return: 0 on success or error on failure
  */
-static void xpsgtr_controller_reset(struct xpsgtr_phy *gtr_phy)
+static int xpsgtr_controller_reset(struct xpsgtr_phy *gtr_phy)
 {
 	struct xpsgtr_dev *gtr_dev = gtr_phy->data;
-	u32 reg;
+	int ret;
 
 	switch (gtr_phy->type) {
 	case XPSGTR_TYPE_USB0:
-		reg = readl(gtr_dev->lpd + RST_LPD);
-		reg |= USB0_RESET;
-		writel(reg, gtr_dev->lpd + RST_LPD);
+		ret = xpsgtr_reset_assert(gtr_dev->usb0_crst);
+		ret = xpsgtr_reset_assert(gtr_dev->usb0_hibrst);
+		ret = xpsgtr_reset_assert(gtr_dev->usb0_apbrst);
 		break;
 	case XPSGTR_TYPE_USB1:
-		reg = readl(gtr_dev->lpd + RST_LPD);
-		reg |= USB1_RESET;
-		writel(reg, gtr_dev->lpd + RST_LPD);
+		ret = xpsgtr_reset_assert(gtr_dev->usb1_crst);
+		ret = xpsgtr_reset_assert(gtr_dev->usb1_hibrst);
+		ret = xpsgtr_reset_assert(gtr_dev->usb1_apbrst);
 		break;
 	case XPSGTR_TYPE_SATA_0:
 	case XPSGTR_TYPE_SATA_1:
-		reg = readl(gtr_dev->fpd + RST_FPD);
-		reg |= SATA_RESET;
-		writel(reg, gtr_dev->fpd + RST_FPD);
+		ret = xpsgtr_reset_assert(gtr_dev->sata_rst);
 		break;
 	case XPSGTR_TYPE_DP_0:
 	case XPSGTR_TYPE_DP_1:
-		reg = readl(gtr_dev->fpd + RST_FPD);
-		reg |= DP_RESET;
-		writel(reg, gtr_dev->fpd + RST_FPD);
+		ret = xpsgtr_reset_assert(gtr_dev->dp_rst);
+		break;
+	case XPSGTR_TYPE_SGMII0:
+		ret = xpsgtr_reset_assert(gtr_dev->gem0_rst);
+		break;
+	case XPSGTR_TYPE_SGMII1:
+		ret = xpsgtr_reset_assert(gtr_dev->gem1_rst);
+		break;
+	case XPSGTR_TYPE_SGMII2:
+		ret = xpsgtr_reset_assert(gtr_dev->gem2_rst);
+		break;
+	case XPSGTR_TYPE_SGMII3:
+		ret = xpsgtr_reset_assert(gtr_dev->gem3_rst);
 		break;
 	default:
+		ret = -EINVAL;
 		break;
 	}
+
+	return ret;
 }
 
 /**
  * xpsgtr_controller_release_reset - releases controller from reset
  * @gtr_phy: pointer to lane
+ *
+ * Return: 0 on success or error on failure
  */
-static void xpsgtr_controller_release_reset(struct xpsgtr_phy *gtr_phy)
+static int xpsgtr_controller_release_reset(struct xpsgtr_phy *gtr_phy)
 {
 	struct xpsgtr_dev *gtr_dev = gtr_phy->data;
-	u32 reg;
+	int ret;
 
 	switch (gtr_phy->type) {
 	case XPSGTR_TYPE_USB0:
-		reg = readl(gtr_dev->lpd + RST_LPD);
-		reg &= ~USB0_RESET;
-		writel(reg, gtr_dev->lpd + RST_LPD);
+		xpsgtr_reset_release(gtr_dev->usb0_apbrst);
+
+		/* Config PIPE3 signals after releasing APB reset */
+		xpsgtr_config_usbpipe(gtr_phy);
+
+		ret = xpsgtr_reset_release(gtr_dev->usb0_crst);
+		ret = xpsgtr_reset_release(gtr_dev->usb0_hibrst);
 		break;
 	case XPSGTR_TYPE_USB1:
-		reg = readl(gtr_dev->lpd + RST_LPD);
-		reg &= ~USB1_RESET;
-		writel(reg, gtr_dev->lpd + RST_LPD);
+		xpsgtr_reset_release(gtr_dev->usb1_apbrst);
+
+		/* Config PIPE3 signals after releasing APB reset */
+		xpsgtr_config_usbpipe(gtr_phy);
+
+		ret = xpsgtr_reset_release(gtr_dev->usb1_crst);
+		ret = xpsgtr_reset_release(gtr_dev->usb1_hibrst);
 		break;
 	case XPSGTR_TYPE_SATA_0:
 	case XPSGTR_TYPE_SATA_1:
-		reg = readl(gtr_dev->fpd + RST_FPD);
-		reg &= ~SATA_RESET;
-		writel(reg, gtr_dev->fpd + RST_FPD);
+		ret = xpsgtr_reset_release(gtr_dev->sata_rst);
 		break;
 	case XPSGTR_TYPE_DP_0:
 	case XPSGTR_TYPE_DP_1:
-		reg = readl(gtr_dev->fpd + RST_FPD);
-		reg &= ~DP_RESET;
-		writel(reg, gtr_dev->fpd + RST_FPD);
+		ret = xpsgtr_reset_release(gtr_dev->dp_rst);
+		break;
+	case XPSGTR_TYPE_SGMII0:
+		ret = xpsgtr_reset_release(gtr_dev->gem0_rst);
+		break;
+	case XPSGTR_TYPE_SGMII1:
+		ret = xpsgtr_reset_release(gtr_dev->gem1_rst);
+		break;
+	case XPSGTR_TYPE_SGMII2:
+		ret = xpsgtr_reset_release(gtr_dev->gem2_rst);
+		break;
+	case XPSGTR_TYPE_SGMII3:
+		ret = xpsgtr_reset_release(gtr_dev->gem3_rst);
 		break;
 	default:
+		ret = -EINVAL;
 		break;
 	}
+
+	return ret;
 }
+
+/**
+ * xpsgtr_usb_rst_assert - assert USB core reset
+ * @phy: pointer to phy
+ *
+ * Return: 0 on success or error on failure
+ */
+int xpsgtr_usb_crst_assert(struct phy *phy)
+{
+	struct xpsgtr_phy *gtr_phy = phy_get_drvdata(phy);
+	struct xpsgtr_dev *gtr_dev = gtr_phy->data;
+	int ret;
+
+	switch (gtr_phy->type) {
+	case XPSGTR_TYPE_USB0:
+		ret = xpsgtr_reset_assert(gtr_dev->usb0_crst);
+		break;
+	case XPSGTR_TYPE_USB1:
+		ret = xpsgtr_reset_assert(gtr_dev->usb1_crst);
+		break;
+	default:
+		ret = -EINVAL;
+		break;
+	}
+
+	return ret;
+}
+EXPORT_SYMBOL(xpsgtr_usb_crst_assert);
+
+/**
+ * xpsgtr_usb_rst_release - release USB core reset
+ * @phy: pointer to phy
+ *
+ * Return: 0 on success or error on failure
+ */
+int xpsgtr_usb_crst_release(struct phy *phy)
+{
+	struct xpsgtr_phy *gtr_phy = phy_get_drvdata(phy);
+	struct xpsgtr_dev *gtr_dev = gtr_phy->data;
+	int ret;
+
+	switch (gtr_phy->type) {
+	case XPSGTR_TYPE_USB0:
+		ret = xpsgtr_reset_release(gtr_dev->usb0_crst);
+		break;
+	case XPSGTR_TYPE_USB1:
+		ret = xpsgtr_reset_release(gtr_dev->usb1_crst);
+		break;
+	default:
+		ret = -EINVAL;
+		break;
+	}
+
+	return ret;
+}
+EXPORT_SYMBOL(xpsgtr_usb_crst_release);
 
 int xpsgtr_wait_pll_lock(struct phy *phy)
 {
@@ -602,17 +798,57 @@ int xpsgtr_wait_pll_lock(struct phy *phy)
 		gtr_phy->pll_lock = true;
 
 	dev_info(gtr_dev->dev, "Lane:%d type:%d protocol:%d pll_locked:%s\n",
-			gtr_phy->lane, gtr_phy->type, gtr_phy->protocol,
-			gtr_phy->pll_lock ? "yes" : "no");
+		 gtr_phy->lane, gtr_phy->type, gtr_phy->protocol,
+		 gtr_phy->pll_lock ? "yes" : "no");
 	return ret;
 }
 EXPORT_SYMBOL_GPL(xpsgtr_wait_pll_lock);
 
 /**
- * xpsgtr_misc_sata - miscellaneous settings for SATA
+ * xpsgtr_set_txwidth - This function sets the tx bus width of the lane
+ * @gtr_phy: pointer to lane
+ * @width: tx bus width size
+ */
+static void xpsgtr_set_txwidth(struct xpsgtr_phy *gtr_phy, u32 width)
+{
+	struct xpsgtr_dev *gtr_dev = gtr_phy->data;
+
+	writel(gtr_phy->lane * PROT_BUS_WIDTH_SHIFT >> width,
+	       gtr_dev->serdes + TX_PROT_BUS_WIDTH);
+}
+
+/**
+ * xpsgtr_set_rxwidth - This function sets the rx bus width of the lane
+ * @gtr_phy: pointer to lane
+ * @width: rx bus width size
+ */
+static void xpsgtr_set_rxwidth(struct xpsgtr_phy *gtr_phy, u32 width)
+{
+	struct xpsgtr_dev *gtr_dev = gtr_phy->data;
+
+	writel(gtr_phy->lane * PROT_BUS_WIDTH_SHIFT >> width,
+	       gtr_dev->serdes + RX_PROT_BUS_WIDTH);
+}
+
+/**
+ * xpsgtr_bypass_scramenc - This bypasses scrambler and 8b/10b encoder feature
  * @gtr_phy: pointer to lane
  */
-static void xpsgtr_misc_sata(struct xpsgtr_phy *gtr_phy)
+static void xpsgtr_bypass_scramenc(struct xpsgtr_phy *gtr_phy)
+{
+	u32 offset;
+	struct xpsgtr_dev *gtr_dev = gtr_phy->data;
+
+	/* bypass Scrambler and 8b/10b Encoder */
+	offset = gtr_phy->lane * TX_DIG_61_OFFSET + L0_TX_DIG_61;
+	writel(TM_DISABLE_SCRAMBLE_ENCODER, gtr_dev->serdes + offset);
+}
+
+/**
+ * xpsgtr_bypass_descramdec - bypasses descrambler and 8b/10b encoder feature
+ * @gtr_phy: pointer to lane
+ */
+static void xpsgtr_bypass_descramdec(struct xpsgtr_phy *gtr_phy)
 {
 	u32 offset;
 	struct xpsgtr_dev *gtr_dev = gtr_phy->data;
@@ -620,43 +856,143 @@ static void xpsgtr_misc_sata(struct xpsgtr_phy *gtr_phy)
 	/* bypass Descrambler and 8b/10b decoder */
 	offset = gtr_phy->lane * TM_DIG_6_OFFSET + L0_TM_DIG_6;
 	writel(TM_DISABLE_DESCRAMBLE_DECODER, gtr_dev->serdes + offset);
+}
+
+/**
+ * xpsgtr_misc_sgmii - miscellaneous settings for SGMII
+ * @gtr_phy: pointer to lane
+ */
+static void xpsgtr_misc_sgmii(struct xpsgtr_phy *gtr_phy)
+{
+	/* Set SGMII protocol tx bus width 10 bits */
+	xpsgtr_set_txwidth(gtr_phy, PROT_BUS_WIDTH_10);
+
+	/* Set SGMII protocol rx bus width 10 bits */
+	xpsgtr_set_rxwidth(gtr_phy, PROT_BUS_WIDTH_10);
+
+	/* bypass Descrambler and 8b/10b decoder */
+	xpsgtr_bypass_descramdec(gtr_phy);
 
 	/* bypass Scrambler and 8b/10b Encoder */
-	offset = gtr_phy->lane * TX_DIG_61_OFFSET + L0_TX_DIG_61;
-	writel(TM_DISABLE_SCRAMBLE_ENCODER, gtr_dev->serdes + offset);
+	xpsgtr_bypass_scramenc(gtr_phy);
+}
+
+/**
+ * xpsgtr_misc_sata - miscellaneous settings for SATA
+ * @gtr_phy: pointer to lane
+ */
+static void xpsgtr_misc_sata(struct xpsgtr_phy *gtr_phy)
+{
+	struct xpsgtr_dev *gtr_dev = gtr_phy->data;
+
+	/* bypass Descrambler and 8b/10b decoder */
+	xpsgtr_bypass_descramdec(gtr_phy);
+
+	/* bypass Scrambler and 8b/10b Encoder */
+	xpsgtr_bypass_scramenc(gtr_phy);
 
 	writel(gtr_phy->lane, gtr_dev->siou + SATA_CONTROL_OFFSET);
 }
 
+/**
+ * xpsgtr_ulpi_reset - This function perform's ULPI reset sequence.
+ * @gtr_phy: pointer to lane
+ *
+ * Return: 0 on success, -EINVAL on non existing USB type or error from
+ * communication with firmware
+ */
+static int xpsgtr_ulpi_reset(struct xpsgtr_phy *gtr_phy)
+{
+	u32 node_id;
+	int ret = 0;
+	struct xpsgtr_dev *gtr_dev = gtr_phy->data;
+	const struct zynqmp_eemi_ops *eemi_ops = zynqmp_pm_get_eemi_ops();
+
+	if (!eemi_ops || !eemi_ops->ioctl)
+		return -ENOTSUPP;
+
+	switch (gtr_phy->type) {
+	case XPSGTR_TYPE_USB0:
+		node_id = NODE_USB_0;
+		break;
+	case XPSGTR_TYPE_USB1:
+		node_id = NODE_USB_1;
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	ret = eemi_ops->ioctl(node_id, IOCTL_ULPI_RESET, 0, 0, NULL);
+	if (ret < 0)
+		dev_err(gtr_dev->dev, "failed to perform ULPI reset\n");
+
+	return ret;
+}
 
 /**
- * xpsgtr_ulpi_reset - This function does ULPI reset.
+ * xpsgtr_set_sgmii_pcs - This function sets the sgmii mode for GEM.
  * @gtr_phy: pointer to lane
+ *
+ * Return: 0 on success, -EINVAL on non existing SGMII type or error from
+ * communication with firmware
  */
-static void xpsgtr_ulpi_reset(struct xpsgtr_phy *gtr_phy)
+static int xpsgtr_set_sgmii_pcs(struct xpsgtr_phy *gtr_phy)
 {
+	u32 node_id;
+	int ret = 0;
 	struct xpsgtr_dev *gtr_dev = gtr_phy->data;
-	unsigned long loop_time = msecs_to_jiffies(RST_ULPI_TIMEOUT);
-	unsigned long timeout;
+	const struct zynqmp_eemi_ops *eemi_ops = zynqmp_pm_get_eemi_ops();
 
-	writel(RST_ULPI_HI, gtr_dev->lpd + RST_ULPI);
+	if (!eemi_ops || !eemi_ops->ioctl)
+		return -ENOTSUPP;
 
-	/* wait for some time */
-	timeout = jiffies + loop_time;
-	do {
-		cpu_relax();
-	} while (!time_after_eq(jiffies, timeout));
+	/* Set the PCS signal detect to 1 */
+	switch (gtr_phy->type) {
+	case XPSGTR_TYPE_SGMII0:
+		node_id = NODE_ETH_0;
+		break;
+	case XPSGTR_TYPE_SGMII1:
+		node_id = NODE_ETH_1;
+		break;
+	case XPSGTR_TYPE_SGMII2:
+		node_id = NODE_ETH_2;
+		break;
+	case XPSGTR_TYPE_SGMII3:
+		node_id = NODE_ETH_3;
+		break;
+	default:
+		return -EINVAL;
+	}
 
-	writel(RST_ULPI_LOW, gtr_dev->lpd + RST_ULPI);
+	ret = eemi_ops->ioctl(node_id, IOCTL_SET_SGMII_MODE,
+			     PM_SGMII_ENABLE, 0, NULL);
+	if (ret < 0) {
+		dev_err(gtr_dev->dev, "failed to set GEM to SGMII mode\n");
+		return ret;
+	}
 
-	/* wait for some time */
-	timeout = jiffies + loop_time;
-	do {
-		cpu_relax();
-	} while (!time_after_eq(jiffies, timeout));
+	return ret;
+}
 
-	writel(RST_ULPI_HI, gtr_dev->lpd + RST_ULPI);
-
+/**
+ * xpsgtr_phyinit_required - check if phy_init for the lane can be skipped
+ * @gtr_phy: pointer to the phy lane
+ *
+ * Return: true if phy_init can be skipped or false
+ */
+static bool xpsgtr_phyinit_required(struct xpsgtr_phy *gtr_phy)
+{
+	/*
+	 * As USB may save the snapshot of the states during hibernation, doing
+	 * phy_init() will put the USB controller into reset, resulting in the
+	 * losing of the saved snapshot. So try to avoid phy_init() for USB
+	 * except when gtr_phy->skip_phy_init is false (this happens when FPD is
+	 * shutdown during suspend or when gt lane is changed from current one)
+	 */
+	if (gtr_phy->protocol == ICM_PROTOCOL_USB && gtr_phy->skip_phy_init)
+		return true;
+	else
+		return false;
 }
 
 /**
@@ -677,16 +1013,23 @@ static int xpsgtr_phy_init(struct phy *phy)
 
 	mutex_lock(&gtr_dev->gtr_mutex);
 
+	/* Check if phy_init() is required  */
+	if (xpsgtr_phyinit_required(gtr_phy))
+		goto out;
+
 	/* Put controller in reset */
-	xpsgtr_controller_reset(gtr_phy);
+	ret = xpsgtr_controller_reset(gtr_phy);
+	if (ret != 0) {
+		dev_err(gtr_dev->dev, "Failed to assert reset\n");
+		goto out;
+	}
 
 	/*
 	 * There is a functional issue in the GT. The TX termination resistance
 	 * can be out of spec due to a bug in the calibration logic. Below is
-	 * the workaround to fix it.
+	 * the workaround to fix it. This below is required for XCZU9EG silicon.
 	 */
 	if (gtr_dev->tx_term_fix) {
-
 		/* Enabling Test Mode control for CMN Rest */
 		reg = readl(gtr_dev->serdes + TM_CMN_RST);
 		reg = (reg & ~TM_CMN_RST_MASK) | TM_CMN_RST_SET;
@@ -701,8 +1044,11 @@ static int xpsgtr_phy_init(struct phy *phy)
 		writel(TM_OVERRIDE_NSW_CODE, gtr_dev->serdes +
 				L3_TM_CALIB_DIG19);
 
-		/* Writing to ICM_CFG0 restes the serdes */
-		writel(1, gtr_dev->serdes + ICM_CFG0);
+		/* As a part of work around sequence for PMOS calibration fix,
+		 * we need to configure any lane ICM_CFG to valid protocol. This
+		 * will deassert the CMN_Resetn signal.
+		 */
+		xpsgtr_lane_setprotocol(gtr_phy);
 
 		/* Clear Test Mode reset */
 		reg = readl(gtr_dev->serdes + TM_CMN_RST);
@@ -762,8 +1108,15 @@ static int xpsgtr_phy_init(struct phy *phy)
 	if (gtr_phy->protocol == ICM_PROTOCOL_SATA)
 		xpsgtr_misc_sata(gtr_phy);
 
+	if (gtr_phy->protocol == ICM_PROTOCOL_SGMII)
+		xpsgtr_misc_sgmii(gtr_phy);
+
 	/* Bring controller out of reset */
-	xpsgtr_controller_release_reset(gtr_phy);
+	ret = xpsgtr_controller_release_reset(gtr_phy);
+	if (ret != 0) {
+		dev_err(gtr_dev->dev, "Failed to release reset\n");
+		goto out;
+	}
 
 	/* Wait till pll is locked for all protocols except DP. For DP
 	 * pll locking function will be called from driver.
@@ -788,8 +1141,11 @@ static int xpsgtr_phy_init(struct phy *phy)
 
 	/* Do ULPI reset for usb */
 	if (gtr_phy->protocol == ICM_PROTOCOL_USB)
-		xpsgtr_ulpi_reset(gtr_phy);
+		ret = xpsgtr_ulpi_reset(gtr_phy);
 
+	/* Select SGMII Mode for GEM and set the PCS Signal detect*/
+	if (gtr_phy->protocol == ICM_PROTOCOL_SGMII)
+		ret = xpsgtr_set_sgmii_pcs(gtr_phy);
 out:
 	mutex_unlock(&gtr_dev->gtr_mutex);
 	return ret;
@@ -804,7 +1160,7 @@ out:
  * Return: 0 on success or error on failure
  */
 static int xpsgtr_set_lanetype(struct xpsgtr_phy *gtr_phy, u8 controller,
-				u8 instance_num)
+			       u8 instance_num)
 {
 	switch (controller) {
 	case PHY_TYPE_SATA:
@@ -870,7 +1226,7 @@ static int xpsgtr_set_lanetype(struct xpsgtr_phy *gtr_phy, u8 controller,
  * Return: pointer to kernel PHY device or error on failure
  */
 static struct phy *xpsgtr_xlate(struct device *dev,
-				   struct of_phandle_args *args)
+				struct of_phandle_args *args)
 {
 	struct xpsgtr_dev *gtr_dev = dev_get_drvdata(dev);
 	struct xpsgtr_phy *gtr_phy = NULL;
@@ -920,7 +1276,7 @@ static struct phy *xpsgtr_xlate(struct device *dev,
 	/* configures SSC settings for a lane */
 	if (xpsgtr_configure_lane(gtr_phy) < 0) {
 		dev_err(gtr_dev->dev, "Invalid clock rate: %d\n",
-						gtr_phy->refclk_rate);
+			gtr_phy->refclk_rate);
 		return ERR_PTR(-EINVAL);
 	}
 
@@ -937,10 +1293,132 @@ static struct phy *xpsgtr_xlate(struct device *dev,
 	return ERR_PTR(-EINVAL);
 }
 
+/**
+ * xpsgtr_phy_exit - clears previous initialized variables
+ * @phy: pointer to kernel PHY device
+ *
+ * Return: 0 on success
+ */
+static int xpsgtr_phy_exit(struct phy *phy)
+{
+	struct xpsgtr_phy *gtr_phy = phy_get_drvdata(phy);
+
+	/* As we are exiting, clear skip_phy_init flag */
+	gtr_phy->skip_phy_init = false;
+
+	return 0;
+}
+
 static struct phy_ops xpsgtr_phyops = {
 	.init		= xpsgtr_phy_init,
+	.exit		= xpsgtr_phy_exit,
 	.owner		= THIS_MODULE,
 };
+
+/*
+ * xpsgtr_get_resets - Gets reset signals based on reset-names property
+ * @gtr_dev: pointer to structure which stores reset information
+ *
+ * Return: 0 on success or error value on failure
+ */
+static int xpsgtr_get_resets(struct xpsgtr_dev *gtr_dev)
+{
+	char *name;
+	struct reset_control *rst_temp;
+
+	gtr_dev->sata_rst = devm_reset_control_get(gtr_dev->dev, "sata_rst");
+	if (IS_ERR(gtr_dev->sata_rst)) {
+		name = "sata_rst";
+		rst_temp = gtr_dev->sata_rst;
+		goto error;
+	}
+
+	gtr_dev->dp_rst = devm_reset_control_get(gtr_dev->dev, "dp_rst");
+	if (IS_ERR(gtr_dev->dp_rst)) {
+		name = "dp_rst";
+		rst_temp = gtr_dev->dp_rst;
+		goto error;
+	}
+
+	gtr_dev->usb0_crst = devm_reset_control_get(gtr_dev->dev, "usb0_crst");
+	if (IS_ERR(gtr_dev->usb0_crst)) {
+		name = "usb0_crst";
+		rst_temp = gtr_dev->usb0_crst;
+		goto error;
+	}
+
+	gtr_dev->usb1_crst = devm_reset_control_get(gtr_dev->dev, "usb1_crst");
+	if (IS_ERR(gtr_dev->usb1_crst)) {
+		name = "usb1_crst";
+		rst_temp = gtr_dev->usb1_crst;
+		goto error;
+	}
+
+	gtr_dev->usb0_hibrst = devm_reset_control_get(gtr_dev->dev,
+						      "usb0_hibrst");
+	if (IS_ERR(gtr_dev->usb0_hibrst)) {
+		name = "usb0_hibrst";
+		rst_temp = gtr_dev->usb0_hibrst;
+		goto error;
+	}
+
+	gtr_dev->usb1_hibrst = devm_reset_control_get(gtr_dev->dev,
+						      "usb1_hibrst");
+	if (IS_ERR(gtr_dev->usb1_hibrst)) {
+		name = "usb1_hibrst";
+		rst_temp = gtr_dev->usb1_hibrst;
+		goto error;
+	}
+
+	gtr_dev->usb0_apbrst = devm_reset_control_get(gtr_dev->dev,
+						      "usb0_apbrst");
+	if (IS_ERR(gtr_dev->usb0_apbrst)) {
+		name = "usb0_apbrst";
+		rst_temp = gtr_dev->usb0_apbrst;
+		goto error;
+	}
+
+	gtr_dev->usb1_apbrst = devm_reset_control_get(gtr_dev->dev,
+						      "usb1_apbrst");
+	if (IS_ERR(gtr_dev->usb1_apbrst)) {
+		name = "usb1_apbrst";
+		rst_temp = gtr_dev->usb1_apbrst;
+		goto error;
+	}
+
+	gtr_dev->gem0_rst = devm_reset_control_get(gtr_dev->dev, "gem0_rst");
+	if (IS_ERR(gtr_dev->gem0_rst)) {
+		name = "gem0_rst";
+		rst_temp = gtr_dev->gem0_rst;
+		goto error;
+	}
+
+	gtr_dev->gem1_rst = devm_reset_control_get(gtr_dev->dev, "gem1_rst");
+	if (IS_ERR(gtr_dev->gem1_rst)) {
+		name = "gem1_rst";
+		rst_temp = gtr_dev->gem1_rst;
+		goto error;
+	}
+
+	gtr_dev->gem2_rst = devm_reset_control_get(gtr_dev->dev, "gem2_rst");
+	if (IS_ERR(gtr_dev->gem2_rst)) {
+		name = "gem2_rst";
+		rst_temp = gtr_dev->gem2_rst;
+		goto error;
+	}
+
+	gtr_dev->gem3_rst = devm_reset_control_get(gtr_dev->dev, "gem3_rst");
+	if (IS_ERR(gtr_dev->gem3_rst)) {
+		name = "gem3_rst";
+		rst_temp = gtr_dev->gem3_rst;
+		goto error;
+	}
+
+	return 0;
+error:
+	dev_err(gtr_dev->dev, "failed to get %s reset signal\n", name);
+	return PTR_ERR(rst_temp);
+}
 
 /**
  * xpsgtr_probe - The device probe function for driver initialization.
@@ -955,7 +1433,12 @@ static int xpsgtr_probe(struct platform_device *pdev)
 	struct phy_provider *provider;
 	struct phy *phy;
 	struct resource *res;
+	char *soc_rev;
 	int lanecount, port = 0, index = 0;
+	int err;
+
+	if (of_device_is_compatible(np, "xlnx,zynqmp-psgtr"))
+		dev_warn(&pdev->dev, "This binding is deprecated, please use new compatible binding\n");
 
 	gtr_dev = devm_kzalloc(&pdev->dev, sizeof(*gtr_dev), GFP_KERNEL);
 	if (!gtr_dev)
@@ -971,36 +1454,41 @@ static int xpsgtr_probe(struct platform_device *pdev)
 	if (IS_ERR(gtr_dev->siou))
 		return PTR_ERR(gtr_dev->siou);
 
-	res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "lpd");
-	gtr_dev->lpd = devm_ioremap_resource(&pdev->dev, res);
-	if (IS_ERR(gtr_dev->lpd))
-		return PTR_ERR(gtr_dev->lpd);
-
-	res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "fpd");
-	gtr_dev->fpd = devm_ioremap_resource(&pdev->dev, res);
-	if (IS_ERR(gtr_dev->fpd))
-		return PTR_ERR(gtr_dev->fpd);
-
 	lanecount = of_get_child_count(np);
 	if (lanecount > MAX_LANES || lanecount == 0)
 		return -EINVAL;
 
 	gtr_dev->phys = devm_kzalloc(&pdev->dev, sizeof(phy) * lanecount,
-				       GFP_KERNEL);
+				     GFP_KERNEL);
 	if (!gtr_dev->phys)
 		return -ENOMEM;
 
 	gtr_dev->dev = &pdev->dev;
 	platform_set_drvdata(pdev, gtr_dev);
 	mutex_init(&gtr_dev->gtr_mutex);
-	gtr_dev->tx_term_fix = of_property_read_bool(np,
-					"xlnx,tx_termination_fix");
+
+	/* Deferred probe is also handled if nvmem is not ready */
+	soc_rev = zynqmp_nvmem_get_silicon_version(&pdev->dev,
+						   "soc_revision");
+	if (IS_ERR(soc_rev))
+		return PTR_ERR(soc_rev);
+
+	if (*soc_rev == ZYNQMP_SILICON_V1)
+		gtr_dev->tx_term_fix = true;
+
+	kfree(soc_rev);
+
+	err = xpsgtr_get_resets(gtr_dev);
+	if (err) {
+		dev_err(&pdev->dev, "failed to get resets: %d\n", err);
+		return err;
+	}
 
 	for_each_child_of_node(np, child) {
 		struct xpsgtr_phy *gtr_phy;
 
 		gtr_phy = devm_kzalloc(&pdev->dev, sizeof(*gtr_phy),
-					 GFP_KERNEL);
+				       GFP_KERNEL);
 		if (!gtr_phy)
 			return -ENOMEM;
 
@@ -1027,13 +1515,58 @@ static int xpsgtr_probe(struct platform_device *pdev)
 		dev_err(&pdev->dev, "registering provider failed\n");
 			return PTR_ERR(provider);
 	}
+	return 0;
+}
+
+static int xpsgtr_suspend(struct device *dev)
+{
+	struct xpsgtr_dev *gtr_dev = dev_get_drvdata(dev);
+
+	/* Save the ICM_CFG registers */
+	gtr_dev->saved_icm_cfg0 = readl(gtr_dev->serdes + ICM_CFG0);
+	gtr_dev->saved_icm_cfg1 = readl(gtr_dev->serdes + ICM_CFG1);
 
 	return 0;
 }
 
+static int xpsgtr_resume(struct device *dev)
+{
+	unsigned int icm_cfg0, icm_cfg1, index;
+	bool skip_phy_init;
+	struct xpsgtr_phy *gtr_phy;
+	struct xpsgtr_dev *gtr_dev = dev_get_drvdata(dev);
+
+	icm_cfg0 = readl(gtr_dev->serdes + ICM_CFG0);
+	icm_cfg1 = readl(gtr_dev->serdes + ICM_CFG1);
+
+	/* Just return if no gt lanes got configured before suspend */
+	if (!gtr_dev->saved_icm_cfg0 && !gtr_dev->saved_icm_cfg1)
+		return 0;
+
+	/* Check if the ICM configurations changed after suspend */
+	if (icm_cfg0 == gtr_dev->saved_icm_cfg0 &&
+	    icm_cfg1 == gtr_dev->saved_icm_cfg1)
+		skip_phy_init = true;
+	else
+		skip_phy_init = false;
+
+	/* This below updates the skip_phy_init for all gtr_phy instances `*/
+	for (index = 0; index < of_get_child_count(dev->of_node); index++) {
+		gtr_phy = gtr_dev->phys[index];
+		gtr_phy->skip_phy_init = skip_phy_init;
+	}
+
+	return 0;
+}
+
+static const struct dev_pm_ops xpsgtr_pm_ops = {
+	SET_SYSTEM_SLEEP_PM_OPS(xpsgtr_suspend, xpsgtr_resume)
+};
+
 /* Match table for of_platform binding */
 static const struct of_device_id xpsgtr_of_match[] = {
 	{ .compatible = "xlnx,zynqmp-psgtr", },
+	{ .compatible = "xlnx,zynqmp-psgtr-v1.1", },
 	{},
 };
 MODULE_DEVICE_TABLE(of, xpsgtr_of_match);
@@ -1043,6 +1576,7 @@ static struct platform_driver xpsgtr_driver = {
 	.driver = {
 		.name = "xilinx-psgtr",
 		.of_match_table	= xpsgtr_of_match,
+		.pm =  &xpsgtr_pm_ops,
 	},
 };
 
