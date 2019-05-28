@@ -39,23 +39,25 @@
 };
 
 &fpga {
-	axi_vdma: axi-vdma@43000000 {
-		compatible = "xlnx,axi-vdma-1.00.a", "xlnx,axi-vdma";
-		reg = <0x43000000 0x1000>;
+	hdmi_dma: dma@43000000 {
+		compatible = "adi,axi-dmac-1.00.a";
+		reg = <0x43000000 0x10000>;
 		#dma-cells = <1>;
-		#address-cells = <1>;
-		#size-cells = <1>;
-		#dma-channels = <1>;
-		xlnx,num-fstores = <0x3>;
-		xlnx,flush-fsync = <0x1>;
+		interrupts = <0 59 0>;
+		interrupt-parent = <&intc>;
+		clocks = <&clkc 17>;
 
-		dma-channel@43000000 {
-			compatible = "xlnx,axi-vdma-mm2s-channel";
-			interrupt-parent = <&intc>;
-			interrupts = <0 59 4>;
-			xlnx,datawidth = <64>;
-			xlnx,include-dre = <0>;
-			xlnx,genlock-mode = <0>;
+		adi,channels {
+			#size-cells = <0>;
+			#address-cells = <1>;
+
+			dma-channel@0 {
+				reg = <0>;
+				adi,source-bus-width = <64>;
+				adi,source-bus-type = <0>;
+				adi,destination-bus-width = <64>;
+				adi,destination-bus-type = <1>;
+			};
 		};
 	};
 
@@ -69,7 +71,7 @@
 	axi_hdmi@6C000000 {
 		compatible = "adi,axi-hdmi-tx-1.00.a";
 		reg = <0x6c000000 0x10000>;
-		dmas = <&axi_vdma 0>;
+		dmas = <&hdmi_dma 0>;
 		dma-names = "video";
 		clocks = <&hdmi_clock>;
 		adi,is-rgb;
