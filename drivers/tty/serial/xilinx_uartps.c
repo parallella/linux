@@ -132,7 +132,6 @@ MODULE_PARM_DESC(rx_timeout, "Rx timeout, 1-255");
 #define CDNS_UART_IXR_RXEMPTY	0x00000002 /* RX FIFO empty interrupt. */
 #define CDNS_UART_IXR_MASK	0x00003FFF /* Valid bit mask */
 #define CDNS_UART_IXR_RXMASK	0x000021e7 /* Valid RX bit mask */
-#define CDNS_UART_IXR_RXMASK	0x000021e7 /* Valid RX bit mask */
 
 	/*
 	 * Do not enable parity error interrupt for the following
@@ -230,11 +229,11 @@ static void cdns_uart_rx_disable_permanently(struct uart_port *port)
 	writel(ctrl_reg, port->membase + CDNS_UART_CR);
 
 	/* disable RX interrupts */
-	writel(CDNS_UART_IRX_RXMASK, port->membase + CDNS_UART_IDR);
+	writel(CDNS_UART_IXR_RXMASK, port->membase + CDNS_UART_IDR);
 
 	/* Clear out pending RX interrupts */
 	isrstatus = readl(port->membase + CDNS_UART_ISR);
-	isrstatus &= CDNS_UART_IRX_RXMASK;
+	isrstatus &= CDNS_UART_IXR_RXMASK;
 	writel(isrstatus, port->membase + CDNS_UART_ISR);
 }
 
