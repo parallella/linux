@@ -30,6 +30,8 @@
 #include <linux/cdev.h>
 #include <linux/interrupt.h>
 #include <linux/wait.h>
+#include <linux/sched/mm.h>
+#include <linux/sched/task.h>
 
 #include "epiphany.h"
 
@@ -1197,10 +1199,10 @@ static int mesh_pfn_to_phys_pfn(struct elink_device *elink, unsigned long pfn,
 	return -EINVAL;
 }
 
-static int epiphany_vm_fault(struct vm_area_struct *vma, struct vm_fault *vmf)
+static int epiphany_vm_fault(struct vm_fault *vmf)
 {
 	unsigned long phys_pfn;
-	struct elink_device *elink = vma_to_elink(vma);
+	struct elink_device *elink = vma_to_elink(vmf->vma);
 	int ret;
 
 	if (mutex_lock_interruptible(&epiphany.driver_lock)) {
@@ -1220,7 +1222,7 @@ static int epiphany_vm_fault(struct vm_area_struct *vma, struct vm_fault *vmf)
 	if (ret)
 		goto out_unlock;
 
-	ret = vm_insert_pfn(vma, (unsigned long)vmf->virtual_address, phys_pfn);
+	ret = vm_insert_pfn(vmf->vma, vmf->address, phys_pfn);
 
 out_unlock:
 	mutex_unlock(&epiphany.driver_lock);
@@ -1801,6 +1803,7 @@ static int mesh_attach_or_register(struct array_device *array)
 	}
 
 	mesh->arrays[0] = array;
+	mesh->arrays[1] = NULL; /* end of list */
 
 	ret = minor_get(mesh);
 	if (ret < 0)
@@ -1956,9 +1959,10 @@ static void array_unregister(struct array_device *array)
 		arrprev = NULL;
 		for (arrcurr = &array->mesh->arrays[0]; *arrcurr; arrcurr++) {
 			if (!arrprev) {
-				if (*arrcurr == array)
+				if (*arrcurr == array) {
 					*arrcurr = NULL;
 					arrprev = arrcurr;
+				}
 			} else {
 				*arrprev = *arrcurr;
 				arrprev++;
@@ -2520,7 +2524,7 @@ static int elink_of_probe_clks(struct platform_device *pdev,
 {
 	int ret = 0, i = 0;
 
-	static const char const *names[] = {
+	static const char *names[] = {
 		"fclk0", "fclk1", "fclk2", "fclk3"
 	};
 
